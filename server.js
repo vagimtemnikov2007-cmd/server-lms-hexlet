@@ -75,6 +75,23 @@ app.get('/api/admin/users', async (req, res) => {
   res.json(data);
 });
 
+app.post('/api/login', async (req, res) => {
+  const { iin, password } = req.body;
+
+  const { data: user, error } = await supabase
+    .from('profiles')
+    .select('role, full_name, group_id')
+    .eq('iin', iin)
+    .eq('password', password)
+    .single();
+
+  if (error || !user) {
+    return res.status(401).json({ error: "Неверный ИИН или пароль" });
+  }
+
+  res.json(user); // Возвращаем роль и данные
+});
+
 // Запуск
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер пашет на порту ${PORT}`);
