@@ -79,8 +79,42 @@ app.get('/api/admin/users', async (req, res) => {
   if (error) return res.status(400).json(error);
   res.json(data);
 });
+button_log.addEventListener('click', async function(e) {
+    e.preventDefault();
+    
+    // 1. ПРОВЕРЬ ЭТУ ССЫЛКУ - ТУТ ДОЛЖНО БЫТЬ login
+    const url = 'https://server-lms-hexlet.onrender.com/api/login'; 
+    
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                iin: input_iin.value,
+                password: input_pass.value
+            })
+        });
 
+        // 2. Сначала проверяем, что сервер вообще ответил успешно (код 200)
+        if (!response.ok) {
+            const errorText = await response.text(); // Читаем как текст, если это 404 HTML
+            console.error("Сервер ответил ошибкой:", response.status, errorText);
+            alert("Ошибка сервера: " + response.status);
+            return;
+        }
+
+        const user = await response.json(); // Теперь безопасно читаем JSON
+        console.log("Данные получены:", user);
+        
+        localStorage.setItem('userStatus', user.role);
+        window.location.reload();
+
+    } catch (error) {
+        console.error("Ошибка запроса:", error);
+    }
+});
 // Запуск на 0.0.0.0 для Render
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер пашет на порту ${PORT}`);
 });
+
