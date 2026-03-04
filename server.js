@@ -66,7 +66,6 @@ app.get('/api/homework/:groupId', async (req, res) => {
     .select('*, subjects(title)')
     .eq('group_id', req.params.groupId)
     .order('id', { ascending: false });
-
   if (error) return res.status(400).json(error);
   res.json(data);
 });
