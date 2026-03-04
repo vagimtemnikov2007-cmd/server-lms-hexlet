@@ -1,7 +1,6 @@
 {
   "name": "journal-server",
   "version": "1.0.0",
-  "description": "LMS Server for Supabase",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
