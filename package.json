@@ -1,5 +1,5 @@
 {
-  "name": "journal-server",
+  "name": "server-lms-hexlet",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
@@ -7,8 +7,8 @@
   },
   "dependencies": {
     "express": "^4.18.2",
+    "cors": "^2.8.5",
     "@supabase/supabase-js": "^2.39.0",
-    "dotenv": "^16.3.1",
-    "cors": "^2.8.5"
+    "dotenv": "^16.3.1"
   }
 }
