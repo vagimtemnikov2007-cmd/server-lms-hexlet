@@ -36,7 +36,7 @@ app.post('/api/login', async (req, res) => {
 
   const { data: user, error } = await supabase
     .from('profiles')
-    .select('role, full_name, group_id')
+    .select('role, full_name, group_id, course, specialization')
     .eq('iin', iin)
     .eq('password', password)
     .single();
