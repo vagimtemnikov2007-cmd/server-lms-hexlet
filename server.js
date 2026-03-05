@@ -49,16 +49,20 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Получение журнала
-app.get('/api/journal/:studentId', async (req, res) => {
+app.get('/api/journal/:groupId', async (req, res) => {
+  const { groupId } = req.params;
+  
   const { data, error } = await supabase
     .from('journal')
-    .select('grade, comment, created_at, subjects(title)')
-    .eq('student_id', req.params.studentId);
-  
-  if (error) return res.status(400).json(error);
+    .select('*, subjects(title)') // Если таблицы subjects нет, будет ошибка 400!
+    .eq('group_id', groupId);
+
+  if (error) {
+    console.error(error); // Посмотри в логи Render, там будет точная причина
+    return res.status(400).json(error);
+  }
   res.json(data);
 });
-
 // Получение ДЗ
 app.get('/api/homework/:groupId', async (req, res) => {
   const { data, error } = await supabase
