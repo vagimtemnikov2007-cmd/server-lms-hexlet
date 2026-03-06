@@ -84,6 +84,30 @@ app.get('/api/admin/users', async (req, res) => {
   res.json(data);
 });
 
+// Получение расписания для конкретной группы
+app.get('/api/schedule/:groupId', async (req, res) => {
+  const { groupId } = req.params;
+
+  const { data, error } = await supabase
+    .from('schedule')
+    .select(`
+      day_of_week,
+      lesson_number,
+      room,
+      subjects (
+        title
+      )
+    `)
+    .eq('group_id', groupId)
+    .order('day_of_week', { ascending: true })
+    .order('lesson_number', { ascending: true });
+
+  if (error) {
+    return res.status(400).json(error);
+  }
+  res.json(data);
+});
+
 // Запуск на 0.0.0.0 для Render
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер пашет на порту ${PORT}`);
