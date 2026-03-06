@@ -51,20 +51,11 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/journal/:groupId', async (req, res) => {
   const { groupId } = req.params;
   
-  // Указываем поля явно, чтобы избежать ошибки 42703
+  // Запрашиваем только то, что есть в таблице!
   const { data, error } = await supabase
     .from('journal')
-    .select(`
-      id, 
-      student_id, 
-      subject_id, 
-      grade, 
-      created_at,
-      subjects (
-        title
-      )
-    `)
-    .eq('group_id', groupId);
+    .select('id, student_id, subject_id, grade, created_at, subjects(title)')
+    .eq('group_id', groupId); // Теперь это поле появится после выполнения пункта 1
 
   if (error) {
     console.error("Ошибка Supabase:", error);
