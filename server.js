@@ -48,17 +48,26 @@ app.post('/api/login', async (req, res) => {
   res.json(user);
 });
 
-// Получение журнала
 app.get('/api/journal/:groupId', async (req, res) => {
   const { groupId } = req.params;
   
+  // Указываем поля явно, чтобы избежать ошибки 42703
   const { data, error } = await supabase
     .from('journal')
-    .select('*, subjects(title)') // Если таблицы subjects нет, будет ошибка 400!
+    .select(`
+      id, 
+      student_id, 
+      subject_id, 
+      grade, 
+      created_at,
+      subjects (
+        title
+      )
+    `)
     .eq('group_id', groupId);
 
   if (error) {
-    console.error(error); // Посмотри в логи Render, там будет точная причина
+    console.error("Ошибка Supabase:", error);
     return res.status(400).json(error);
   }
   res.json(data);
