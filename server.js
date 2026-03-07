@@ -108,7 +108,17 @@ app.get('/api/schedule/:groupId', async (req, res) => {
   res.json(data);
 });
 
-// Запуск на 0.0.0.0 для Render
+
+app.get('/api/news', async (req, res) => {
+  const { data, error } = await supabase
+    .from('news')
+    .select('*')
+    .order('created_at', { ascending: false }); // Сначала свежие новости
+
+  if (error) return res.status(400).json(error);
+  res.json(data);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер пашет на порту ${PORT}`);
 });
