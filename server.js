@@ -74,6 +74,15 @@ app.get('/api/homework/:groupId', async (req, res) => {
   res.json(data);
 });
 
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+
+app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
+    // 1. Сохрани путь к файлу в базу данных (таблица student_homework)
+    // 2. Логика сохранения здесь...
+    res.json({ message: "Файл получен" });
+});
+
 // Получение всех юзеров (для Админа)
 app.get('/api/admin/users', async (req, res) => {
   const { data, error } = await supabase
