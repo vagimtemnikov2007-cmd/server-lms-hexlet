@@ -83,6 +83,30 @@ app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
     res.json({ message: "Файл получен" });
 });
 
+app.post('/api/homework', async (req, res) => {
+    try {
+        const { group_id, subject_title, title, description, format, deadline } = req.body;
+
+        // Вставка в таблицу homework
+        const { data, error } = await supabase
+            .from('homework')
+            .insert([{ 
+                group_id: parseInt(group_id), 
+                subject_title, 
+                title, 
+                description, 
+                format, 
+                deadline 
+            }]);
+
+        if (error) throw error;
+
+        res.status(201).json({ message: "Задание создано", data });
+    } catch (err) {
+        console.error("Ошибка сервера:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
 // Получение всех юзеров (для Админа)
 app.get('/api/admin/users', async (req, res) => {
   const { data, error } = await supabase
