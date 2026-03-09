@@ -152,6 +152,19 @@ app.get('/api/news', async (req, res) => {
   res.json(data);
 });
 
+app.get('/api/statistics/:groupId', async (req, res) => {
+  const { groupId } = req.params;
+  
+  const { data, error } = await supabase
+    .from('group_statistics')
+    .select('*')
+    .eq('group_id', groupId)
+    .single();
+
+  if (error) return res.status(400).json(error);
+  res.json(data);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер пашет на порту ${PORT}`);
 });
