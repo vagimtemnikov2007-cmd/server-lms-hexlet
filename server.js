@@ -146,13 +146,13 @@ app.get('/api/news', async (req, res) => {
   const { data, error } = await supabase
     .from('news')
     .select('*')
-    .order('created_at', { ascending: false }); // Сначала свежие новости
+    .order('created_at', { ascending: false });
 
   if (error) return res.status(400).json(error);
   res.json(data);
 });
 
-app.get('/api/statistics/:groupId', async (req, res) => {
+app.get('/api/statistics', async (req, res) => {
   const { groupId } = req.params;
   
   const { data, error } = await supabase
