@@ -152,17 +152,29 @@ app.get('/api/news', async (req, res) => {
   res.json(data);
 });
 
-app.get('/api/statistics', async (req, res) => {
-  const { groupId } = req.params;
-  
-  const { data, error } = await supabase
-    .from('group_statistics')
-    .select('*')
-    .eq('group_id', groupId)
-    .single();
+app.get('/api/teacher/groups/:teacherId', async (req, res) => {
+    const { teacherId } = req.params;
+    
+    const { data, error } = await supabase
+        .from('teacher_groups')
+        .select('groups(id, name)')
+        .eq('teacher_id', teacherId);
 
-  if (error) return res.status(400).json(error);
-  res.json(data);
+    if (error) return res.status(400).json(error);
+    res.json(data);
+});
+
+app.get('/api/teacher/students/:groupId', async (req, res) => {
+    const { groupId } = req.params;
+    
+    const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, course, specialization')
+        .eq('group_id', groupId)
+        .eq('role', 'student');
+
+    if (error) return res.status(400).json(error);
+    res.json(data);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
