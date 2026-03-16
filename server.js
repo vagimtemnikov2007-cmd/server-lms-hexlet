@@ -36,7 +36,7 @@ app.post('/api/login', async (req, res) => {
 
   const { data: user, error } = await supabase
     .from('profiles')
-    .select('role, full_name, group_id, course, specialization')
+    .select('id, role, full_name, group_id, course, specialization')
     .eq('iin', iin)
     .eq('password', password)
     .single();
@@ -151,17 +151,20 @@ app.get('/api/news', async (req, res) => {
   if (error) return res.status(400).json(error);
   res.json(data);
 });
-
 app.get('/api/teacher/groups/:teacherId', async (req, res) => {
+
     const { teacherId } = req.params;
-    
+
     const { data, error } = await supabase
         .from('teacher_groups')
         .select('groups(id, name)')
         .eq('teacher_id', teacherId);
 
     if (error) return res.status(400).json(error);
-    res.json(data);
+
+    const groups = data.map(g => g.groups);
+
+    res.json(groups);
 });
 
 app.get('/api/teacher/students/:groupId', async (req, res) => {
@@ -175,6 +178,56 @@ app.get('/api/teacher/students/:groupId', async (req, res) => {
 
     if (error) return res.status(400).json(error);
     res.json(data);
+});
+
+app.get('/api/statistics/:groupId', async (req, res) => {
+
+    const { groupId } = req.params;
+
+    const { data: students, error } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .eq('group_id', groupId)
+        .eq('role', 'student');
+
+    if (error) return res.status(400).json(error);
+
+    const { data: grades } = await supabase
+        .from('journal')
+        .select('student_id, grade')
+        .eq('group_id', groupId);
+
+    const student_grades = students.map(s => {
+
+        const studentGrades = grades
+            .filter(g => g.student_id === s.id)
+            .map(g => g.grade);
+
+        const avg = studentGrades.length
+            ? Math.round(studentGrades.reduce((a,b)=>a+b)/studentGrades.length)
+            : 0;
+
+        return {
+            full_name: s.full_name,
+            grade: avg
+        };
+
+    });
+
+    const groupAvg = student_grades.length
+        ? Math.round(student_grades.reduce((a,b)=>a+b.grade,0)/student_grades.length)
+        : 0;
+
+    res.json({
+        group_name: `Группа ${groupId}`,
+        average_grade: groupAvg,
+        student_grades
+    });
+
+});
+
+app.get('/api/statistic/:groupId', async (req,res)=>{
+    res.redirect(`/api/statistics/${req.params.groupId}`);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
