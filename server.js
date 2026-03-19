@@ -185,50 +185,135 @@
   });
 
   app.get('/api/statistics/:groupId', async (req, res) => {
+    try {
+        const groupId = Number(req.params.groupId);
+        const teacherId = Number(req.query.teacherId);
+        const month = req.query.month; // формат YYYY-MM
 
-      const { groupId } = req.params;
+        if (!groupId || !teacherId) {
+            return res.status(400).json({ error: "groupId или teacherId некорректен" });
+        }
 
-      const { data: students, error } = await supabase
-          .from('profiles')
-          .select('id, full_name')
-          .eq('group_id', groupId)
-          .eq('role', 'student');
+        if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+            return res.status(400).json({ error: "month должен быть в формате YYYY-MM" });
+        }
 
-      if (error) return res.status(400).json(error);
+        // 1. Проверяем, что группа принадлежит преподавателю
+        const { data: teacherGroup, error: teacherGroupError } = await supabase
+            .from('teacher_groups')
+            .select('group_id, groups(name)')
+            .eq('teacher_id', teacherId)
+            .eq('group_id', groupId)
+            .maybeSingle();
 
-      const { data: grades } = await supabase
-          .from('journal')
-          .select('student_id, grade')
-          .eq('group_id', groupId);
+        if (teacherGroupError) {
+            console.error("Ошибка проверки teacher_groups:", teacherGroupError);
+            return res.status(400).json(teacherGroupError);
+        }
 
-      const student_grades = students.map(s => {
+        if (!teacherGroup) {
+            return res.status(403).json({ error: "Эта группа не принадлежит преподавателю" });
+        }
 
-          const studentGrades = grades
-              .filter(g => g.student_id === s.id)
-              .map(g => g.grade);
+        // 2. Получаем всех студентов группы
+        const { data: students, error: studentsError } = await supabase
+            .from('profiles')
+            .select('id, full_name')
+            .eq('group_id', groupId)
+            .eq('role', 'student')
+            .order('full_name', { ascending: true });
 
-          const avg = studentGrades.length
-              ? Math.round(studentGrades.reduce((a,b)=>a+b)/studentGrades.length)
-              : 0;
+        if (studentsError) {
+            console.error("Ошибка загрузки студентов:", studentsError);
+            return res.status(400).json(studentsError);
+        }
 
-          return {
-              full_name: s.full_name,
-              grade: avg
-          };
+        // 3. Границы месяца
+        const [year, monthNum] = month.split('-').map(Number);
+        const startDate = new Date(year, monthNum - 1, 1);
+        const endDate = new Date(year, monthNum, 1);
 
-      });
+        const startISO = startDate.toISOString();
+        const endISO = endDate.toISOString();
 
-      const groupAvg = student_grades.length
-          ? Math.round(student_grades.reduce((a,b)=>a+b.grade,0)/student_grades.length)
-          : 0;
+        const daysInMonth = new Date(year, monthNum, 0).getDate();
+        const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
 
-      res.json({
-          group_name: `Группа ${groupId}`,
-          average_grade: groupAvg,
-          student_grades
-      });
+        // 4. Получаем оценки за этот месяц
+        const { data: grades, error: gradesError } = await supabase
+            .from('journal')
+            .select('student_id, grade, created_at')
+            .eq('group_id', groupId)
+            .gte('created_at', startISO)
+            .lt('created_at', endISO)
+            .order('created_at', { ascending: true });
 
-  });
+        if (gradesError) {
+            console.error("Ошибка загрузки оценок:", gradesError);
+            return res.status(400).json(gradesError);
+        }
+
+        // 5. Формируем таблицу оценок по дням
+        const studentsResult = students.map(student => {
+            const studentGrades = grades.filter(g => g.student_id === student.id);
+
+            const gradesByDay = {};
+
+            for (const item of studentGrades) {
+                const day = new Date(item.created_at).getDate();
+
+                if (!gradesByDay[day]) {
+                    gradesByDay[day] = [];
+                }
+
+                gradesByDay[day].push(item.grade);
+            }
+
+            // если в день одна оценка — отдаём число, если несколько — массив
+            const normalizedGradesByDay = {};
+            for (const day of Object.keys(gradesByDay)) {
+                normalizedGradesByDay[day] =
+                    gradesByDay[day].length === 1 ? gradesByDay[day][0] : gradesByDay[day];
+            }
+
+            const flatGrades = studentGrades.map(g => Number(g.grade)).filter(g => !isNaN(g));
+            const averageGrade = flatGrades.length
+                ? Math.round(flatGrades.reduce((a, b) => a + b, 0) / flatGrades.length)
+                : 0;
+
+            return {
+                student_id: student.id,
+                full_name: student.full_name,
+                grades_by_day: normalizedGradesByDay,
+                average_grade: averageGrade
+            };
+        });
+
+        const allGrades = grades
+            .map(g => Number(g.grade))
+            .filter(g => !isNaN(g));
+
+        const groupAvg = allGrades.length
+            ? Math.round(allGrades.reduce((a, b) => a + b, 0) / allGrades.length)
+            : 0;
+
+        const monthLabel = `${String(monthNum).padStart(2, '0')}.${year}`;
+
+        res.json({
+            group_id: groupId,
+            group_name: teacherGroup.groups?.name || `Группа ${groupId}`,
+            month,
+            month_label: monthLabel,
+            days,
+            average_grade: groupAvg,
+            students: studentsResult
+        });
+
+    } catch (err) {
+        console.error("Ошибка сервера /api/statistics/:groupId", err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
   app.get('/api/statistic/:groupId', async (req,res)=>{
       res.redirect(`/api/statistics/${req.params.groupId}`);
