@@ -31,24 +31,40 @@ app.get('/', (req, res) => {
 
 app.post('/api/login', async (req, res) => {
   try {
-    const { iin, password } = req.body;
+    let { iin, password } = req.body;
 
     if (!iin || !password) {
       return res.status(400).json({ error: 'Введите ИИН и пароль' });
     }
 
+    // 🔥 чистим вход
+    iin = String(iin).trim();
+    password = String(password).trim();
+
+    console.log('LOGIN INPUT:', { iin, password });
+
     const { data: user, error } = await supabase
       .from('profiles')
-      .select('id, role, full_name, group_id, course, specialization')
-      .eq('iin', iin)
-      .eq('password', password)
-      .single();
+      .select('id, role, full_name, group_id, course, specialization, iin, password')
+      .eq('iin', iin) // пока строка
+      .maybeSingle(); // 🔥 УБРАЛИ single()
 
-    if (error || !user) {
+    console.log('USER FOUND:', user);
+
+    if (error) {
+      return res.status(400).json(error);
+    }
+
+    // ❗ теперь вручную проверяем пароль
+    if (!user || String(user.password) !== password) {
       return res.status(401).json({ error: 'Неверный ИИН или пароль' });
     }
 
+    // убираем пароль из ответа
+    delete user.password;
+
     res.json(user);
+
   } catch (err) {
     console.error('Ошибка /api/login:', err);
     res.status(500).json({ error: err.message });
