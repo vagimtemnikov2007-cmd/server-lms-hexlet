@@ -60,19 +60,112 @@ app.get('/api/journal/:groupId', async (req, res) => {
   res.json(data);
 });
 
-app.get('/api/homework/:groupId', async (req, res) => {
-  const { data, error } = await supabase
-    .from('homework')
-    .select('*, subjects(title)')
-    .eq('group_id', req.params.groupId)
-    .order('id', { ascending: false });
+app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
+    try {
+        const { groupId, studentId } = req.params;
 
-  if (error) return res.status(400).json(error);
-  res.json(data);
+        const { data: homeworkData, error: hwError } = await supabase
+            .from('homework')
+            .select('*')
+            .eq('group_id', groupId)
+            .order('id', { ascending: false });
+
+        if (hwError) {
+            return res.status(400).json(hwError);
+        }
+
+        const homeworkIds = homeworkData.map(h => h.id);
+
+        let submissions = [];
+        if (homeworkIds.length) {
+            const { data: subData, error: subError } = await supabase
+                .from('homework_submissions')
+                .select('*')
+                .eq('student_id', studentId)
+                .in('homework_id', homeworkIds);
+
+            if (subError) {
+                return res.status(400).json(subError);
+            }
+
+            submissions = subData || [];
+        }
+
+        const result = homeworkData.map(hw => {
+            const submission = submissions.find(s => s.homework_id === hw.id) || null;
+            return {
+                ...hw,
+                submission
+            };
+        });
+
+        res.json(result);
+    } catch (err) {
+        console.error('Ошибка student/homework:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
-  res.json({ message: "Файл получен" });
+    try {
+        const { homework_id, student_id, answer_text } = req.body;
+        const file = req.file;
+
+        if (!homework_id || !student_id) {
+            return res.status(400).json({ error: 'homework_id и student_id обязательны' });
+        }
+
+        const payload = {
+            homework_id: Number(homework_id),
+            student_id,
+            answer_text: answer_text || null,
+            file_name: file ? file.originalname : null,
+            file_path: file ? file.path : null,
+            status: 'submitted',
+            grade: null,
+            teacher_comment: null,
+            submitted_at: new Date().toISOString(),
+            reviewed_at: null
+        };
+
+        const { data: existing, error: existingError } = await supabase
+            .from('homework_submissions')
+            .select('id')
+            .eq('homework_id', Number(homework_id))
+            .eq('student_id', student_id)
+            .maybeSingle();
+
+        if (existingError) {
+            return res.status(400).json(existingError);
+        }
+
+        let result;
+        let error;
+
+        if (existing) {
+            ({ data: result, error } = await supabase
+                .from('homework_submissions')
+                .update(payload)
+                .eq('id', existing.id)
+                .select()
+                .single());
+        } else {
+            ({ data: result, error } = await supabase
+                .from('homework_submissions')
+                .insert([payload])
+                .select()
+                .single());
+        }
+
+        if (error) {
+            return res.status(400).json(error);
+        }
+
+        res.json({ message: 'Задание сохранено', submission: result });
+    } catch (err) {
+        console.error('Ошибка submit-homework:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/api/homework', async (req, res) => {
