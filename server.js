@@ -37,34 +37,26 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Введите ИИН и пароль' });
     }
 
-    // 🔥 чистим вход
     iin = String(iin).trim();
     password = String(password).trim();
 
-    console.log('LOGIN INPUT:', { iin, password });
-
     const { data: user, error } = await supabase
       .from('profiles')
-      .select('id, role, full_name, group_id, course, specialization, iin, password')
-      .eq('iin', iin) // пока строка
-      .maybeSingle(); // 🔥 УБРАЛИ single()
-
-    console.log('USER FOUND:', user);
+      .select('id, role, full_name, group_id, course, specialization, iin, password, can_edit_news')
+      .eq('iin', iin)
+      .maybeSingle();
 
     if (error) {
       return res.status(400).json(error);
     }
 
-    // ❗ теперь вручную проверяем пароль
     if (!user || String(user.password) !== password) {
       return res.status(401).json({ error: 'Неверный ИИН или пароль' });
     }
 
-    // убираем пароль из ответа
     delete user.password;
 
     res.json(user);
-
   } catch (err) {
     console.error('Ошибка /api/login:', err);
     res.status(500).json({ error: err.message });
@@ -723,6 +715,157 @@ app.get('/api/statistics/:groupId', async (req, res) => {
     });
   } catch (err) {
     console.error('Ошибка /api/statistics/:groupId:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, full_name, role, group_id, can_edit_news')
+      .order('full_name', { ascending: true });
+
+    if (error) {
+      return res.status(400).json(error);
+    }
+
+    res.json(data || []);
+  } catch (err) {
+    console.error('Ошибка /api/admin/users:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/users/:userId/access', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role, group_id, can_edit_news } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId обязателен' });
+    }
+
+    const allowedRoles = ['student', 'teacher', 'admin'];
+
+    if (!role || !allowedRoles.includes(role)) {
+      return res.status(400).json({ error: 'Некорректная роль' });
+    }
+
+    const payload = {
+      role,
+      group_id: group_id ? Number(group_id) : null,
+      can_edit_news: !!can_edit_news
+    };
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('id', userId)
+      .select('id, full_name, role, group_id, can_edit_news')
+      .single();
+
+    if (error) {
+      return res.status(400).json(error);
+    }
+
+    res.json({
+      message: 'Права пользователя обновлены',
+      user: data
+    });
+  } catch (err) {
+    console.error('Ошибка /api/admin/users/:userId/access:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/news', async (req, res) => {
+  try {
+    const { title, description, image_url, date_start, date_end, created_by } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Заголовок обязателен' });
+    }
+
+    const payload = {
+      title,
+      description: description || null,
+      image_url: image_url || null,
+      date_start: date_start || null,
+      date_end: date_end || null,
+      created_by: created_by || null
+    };
+
+    const { data, error } = await supabase
+      .from('news')
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(400).json(error);
+    }
+
+    res.status(201).json({
+      message: 'Новость опубликована',
+      news: data
+    });
+  } catch (err) {
+    console.error('Ошибка POST /api/news:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/news/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, image_url, date_start, date_end } = req.body;
+
+    const payload = {
+      title,
+      description: description || null,
+      image_url: image_url || null,
+      date_start: date_start || null,
+      date_end: date_end || null
+    };
+
+    const { data, error } = await supabase
+      .from('news')
+      .update(payload)
+      .eq('id', Number(id))
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(400).json(error);
+    }
+
+    res.json({
+      message: 'Новость обновлена',
+      news: data
+    });
+  } catch (err) {
+    console.error('Ошибка PUT /api/news/:id:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/news/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from('news')
+      .delete()
+      .eq('id', Number(id));
+
+    if (error) {
+      return res.status(400).json(error);
+    }
+
+    res.json({ message: 'Новость удалена' });
+  } catch (err) {
+    console.error('Ошибка DELETE /api/news/:id:', err);
     res.status(500).json({ error: err.message });
   }
 });
