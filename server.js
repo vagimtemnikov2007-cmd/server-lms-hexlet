@@ -870,6 +870,72 @@ app.delete('/api/news/:id', async (req, res) => {
   }
 });
 
+/* =========================
+   AVATAR UPLOAD
+========================= */
+
+app.post('/api/avatar/upload', upload.single('avatar'), async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const file = req.file;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId обязателен' });
+    }
+
+    if (!file) {
+      return res.status(400).json({ error: 'Файл не загружен' });
+    }
+
+    // читаем файл
+    const fs = require('fs');
+    const fileBuffer = fs.readFileSync(file.path);
+
+    const fileExt = file.originalname.split('.').pop();
+    const fileName = `${userId}_${Date.now()}.${fileExt}`;
+
+    // грузим в supabase storage
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(fileName, fileBuffer, {
+        contentType: file.mimetype,
+        upsert: true
+      });
+
+    if (uploadError) {
+      console.error(uploadError);
+      return res.status(500).json({ error: 'Ошибка загрузки в storage' });
+    }
+
+    // получаем публичную ссылку
+    const { data } = supabase.storage
+      .from('avatars')
+      .getPublicUrl(fileName);
+
+    const publicUrl = data.publicUrl;
+
+    // сохраняем в profiles
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({ avatar_url: publicUrl })
+      .eq('id', userId);
+
+    if (updateError) {
+      console.error(updateError);
+      return res.status(500).json({ error: 'Ошибка обновления профиля' });
+    }
+
+    res.json({
+      message: 'Аватар загружен',
+      avatar_url: publicUrl
+    });
+
+  } catch (err) {
+    console.error('Ошибка /api/avatar/upload:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/statistic/:groupId', async (req, res) => {
   res.redirect(`/api/statistics/${req.params.groupId}`);
 });
