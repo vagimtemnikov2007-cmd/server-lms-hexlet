@@ -936,6 +936,32 @@ app.post('/api/avatar/upload', upload.single('avatar'), async (req, res) => {
   }
 });
 
+/* =========================
+   PROFILE
+========================= */
+
+app.get('/api/profile/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('avatar_url')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) {
+      console.error(error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json(data || {});
+  } catch (err) {
+    console.error('Ошибка /api/profile:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/statistic/:groupId', async (req, res) => {
   res.redirect(`/api/statistics/${req.params.groupId}`);
 });
