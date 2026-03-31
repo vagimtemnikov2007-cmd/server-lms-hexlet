@@ -1,10 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 const upload = multer({ dest: 'uploads/' });
 
 app.use(cors());
@@ -19,26 +23,103 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-const PORT = process.env.PORT || 3000;
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function sendServerError(res, routeName, err) {
+  console.error(`Ошибка ${routeName}:`, err);
+  return res.status(500).json({ error: err.message || 'Внутренняя ошибка сервера' });
+}
+
+function sendBadRequest(res, error) {
+  return res.status(400).json({
+    error: typeof error === 'string' ? error : error?.message || 'Некорректный запрос'
+  });
+}
+
+function sendForbidden(res, message = 'Нет доступа') {
+  return res.status(403).json({ error: message });
+}
+
+function parseNumber(value, fieldName, { required = false, allowNull = true } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (required) {
+      throw new Error(`${fieldName} обязателен`);
+    }
+    return allowNull ? null : undefined;
+  }
+
+  const num = Number(value);
+
+  if (Number.isNaN(num)) {
+    throw new Error(`${fieldName} должен быть числом`);
+  }
+
+  return num;
+}
+
+function parseString(value) {
+  if (value === undefined || value === null) return null;
+  const str = String(value).trim();
+  return str === '' ? null : str;
+}
+
+function parseBoolean(value) {
+  return !!value;
+}
+
+async function removeTempFile(filePath) {
+  if (!filePath) return;
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (err) {
+    console.warn('Не удалось удалить временный файл:', filePath, err.message);
+  }
+}
+
+function getMonthRange(month) {
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    throw new Error('month должен быть в формате YYYY-MM');
+  }
+
+  const [year, monthNum] = month.split('-').map(Number);
+  const startDate = new Date(year, monthNum - 1, 1);
+  const endDate = new Date(year, monthNum, 1);
+  const daysInMonth = new Date(year, monthNum, 0).getDate();
+
+  return {
+    year,
+    monthNum,
+    startISO: startDate.toISOString(),
+    endISO: endDate.toISOString(),
+    daysInMonth,
+    monthLabel: `${String(monthNum).padStart(2, '0')}.${year}`
+  };
+}
+
+/* =========================================================
+   ROOT
+========================================================= */
 
 app.get('/', (req, res) => {
   res.send('API Электронного журнала работает 🚀');
 });
 
-/* =========================
+/* =========================================================
    LOGIN
-========================= */
+========================================================= */
 
 app.post('/api/login', async (req, res) => {
   try {
     let { iin, password } = req.body;
 
-    if (!iin || !password) {
-      return res.status(400).json({ error: 'Введите ИИН и пароль' });
-    }
+    iin = parseString(iin);
+    password = parseString(password);
 
-    iin = String(iin).trim();
-    password = String(password).trim();
+    if (!iin || !password) {
+      return sendBadRequest(res, 'Введите ИИН и пароль');
+    }
 
     const { data: user, error } = await supabase
       .from('profiles')
@@ -47,7 +128,7 @@ app.post('/api/login', async (req, res) => {
       .maybeSingle();
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
     if (!user || String(user.password) !== password) {
@@ -56,20 +137,19 @@ app.post('/api/login', async (req, res) => {
 
     delete user.password;
 
-    res.json(user);
+    return res.json(user);
   } catch (err) {
-    console.error('Ошибка /api/login:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/login', err);
   }
 });
 
-/* =========================
+/* =========================================================
    JOURNAL
-========================= */
+========================================================= */
 
 app.get('/api/journal/:groupId', async (req, res) => {
   try {
-    const { groupId } = req.params;
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
 
     const { data, error } = await supabase
       .from('journal')
@@ -78,24 +158,23 @@ app.get('/api/journal/:groupId', async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
-    console.error('Ошибка /api/journal/:groupId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/journal/:groupId', err);
   }
 });
 
-/* =========================
+/* =========================================================
    HOMEWORK
-========================= */
+========================================================= */
 
-// Обычный список ДЗ для группы
+// Список ДЗ для группы
 app.get('/api/homework/:groupId', async (req, res) => {
   try {
-    const { groupId } = req.params;
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
 
     const { data, error } = await supabase
       .from('homework')
@@ -104,20 +183,24 @@ app.get('/api/homework/:groupId', async (req, res) => {
       .order('id', { ascending: false });
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
-    console.error('Ошибка /api/homework/:groupId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/homework/:groupId', err);
   }
 });
 
 // ДЗ конкретного ученика + его сдачи
 app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
   try {
-    const { groupId, studentId } = req.params;
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
+    const studentId = parseString(req.params.studentId);
+
+    if (!studentId) {
+      return sendBadRequest(res, 'studentId обязателен');
+    }
 
     const { data: homeworkData, error: hwError } = await supabase
       .from('homework')
@@ -126,14 +209,14 @@ app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
       .order('id', { ascending: false });
 
     if (hwError) {
-      return res.status(400).json(hwError);
+      return sendBadRequest(res, hwError);
     }
 
-    const homeworkIds = (homeworkData || []).map(h => h.id);
+    const homeworkIds = (homeworkData || []).map(item => item.id);
 
     let submissions = [];
 
-    if (homeworkIds.length) {
+    if (homeworkIds.length > 0) {
       const { data: subData, error: subError } = await supabase
         .from('homework_submissions')
         .select('*')
@@ -141,31 +224,42 @@ app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
         .in('homework_id', homeworkIds);
 
       if (subError) {
-        return res.status(400).json(subError);
+        return sendBadRequest(res, subError);
       }
 
       submissions = subData || [];
     }
 
     const result = (homeworkData || []).map(hw => {
-      const submission = submissions.find(s => s.homework_id === hw.id) || null;
+      const submission = submissions.find(sub => sub.homework_id === hw.id) || null;
       return {
         ...hw,
         submission
       };
     });
 
-    res.json(result);
+    return res.json(result);
   } catch (err) {
-    console.error('Ошибка /api/student/homework/:groupId/:studentId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/student/homework/:groupId/:studentId', err);
   }
 });
 
 // Создание ДЗ
 app.post('/api/homework', async (req, res) => {
   try {
-    const {
+    const group_id = parseNumber(req.body.group_id, 'group_id', { required: true });
+    const subject_id = parseNumber(req.body.subject_id, 'subject_id', { required: false, allowNull: true });
+    const subject_title = parseString(req.body.subject_title);
+    const title = parseString(req.body.title);
+    const description = parseString(req.body.description);
+    const format = parseString(req.body.format) || 'офлайн';
+    const deadline = parseString(req.body.deadline);
+
+    if (!title) {
+      return sendBadRequest(res, 'title обязателен');
+    }
+
+    const payload = {
       group_id,
       subject_id,
       subject_title,
@@ -173,20 +267,6 @@ app.post('/api/homework', async (req, res) => {
       description,
       format,
       deadline
-    } = req.body;
-
-    if (!group_id || !title) {
-      return res.status(400).json({ error: 'group_id и title обязательны' });
-    }
-
-    const payload = {
-      group_id: Number(group_id),
-      subject_id: subject_id ? Number(subject_id) : null,
-      subject_title: subject_title || null,
-      title,
-      description: description || null,
-      format: format || 'офлайн',
-      deadline: deadline || null
     };
 
     const { data, error } = await supabase
@@ -195,30 +275,35 @@ app.post('/api/homework', async (req, res) => {
       .select();
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.status(201).json({ message: 'Задание создано', data });
+    return res.status(201).json({
+      message: 'Задание создано',
+      data
+    });
   } catch (err) {
-    console.error('Ошибка /api/homework POST:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/homework POST', err);
   }
 });
 
-// Сдача домашки
+// Сдача ДЗ
 app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
   try {
-    const { homework_id, student_id, answer_text } = req.body;
+    const homework_id = parseNumber(req.body.homework_id, 'homework_id', { required: true });
+    const student_id = parseString(req.body.student_id);
+    const answer_text = parseString(req.body.answer_text);
     const file = req.file;
 
-    if (!homework_id || !student_id) {
-      return res.status(400).json({ error: 'homework_id и student_id обязательны' });
+    if (!student_id) {
+      if (file?.path) await removeTempFile(file.path);
+      return sendBadRequest(res, 'student_id обязателен');
     }
 
     const payload = {
-      homework_id: Number(homework_id),
+      homework_id,
       student_id,
-      answer_text: answer_text || null,
+      answer_text,
       file_name: file ? file.originalname : null,
       file_path: file ? file.path : null,
       status: 'submitted',
@@ -231,12 +316,13 @@ app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
     const { data: existing, error: existingError } = await supabase
       .from('homework_submissions')
       .select('id')
-      .eq('homework_id', Number(homework_id))
+      .eq('homework_id', homework_id)
       .eq('student_id', student_id)
       .maybeSingle();
 
     if (existingError) {
-      return res.status(400).json(existingError);
+      if (file?.path) await removeTempFile(file.path);
+      return sendBadRequest(res, existingError);
     }
 
     let result;
@@ -258,24 +344,32 @@ app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
     }
 
     if (error) {
-      return res.status(400).json(error);
+      if (file?.path) await removeTempFile(file.path);
+      return sendBadRequest(res, error);
     }
 
-    res.json({ message: 'Задание сохранено', submission: result });
+    return res.json({
+      message: 'Задание сохранено',
+      submission: result
+    });
   } catch (err) {
-    console.error('Ошибка /api/submit-homework:', err);
-    res.status(500).json({ error: err.message });
+    if (req.file?.path) await removeTempFile(req.file.path);
+    return sendServerError(res, '/api/submit-homework', err);
   }
 });
 
-/* =========================
+/* =========================================================
    TEACHER HOMEWORK CHECK
-========================= */
+========================================================= */
 
-// Список непроверенных домашних заданий для учителя
+// Список непроверенных ДЗ
 app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
   try {
-    const { teacherId } = req.params;
+    const teacherId = parseString(req.params.teacherId);
+
+    if (!teacherId) {
+      return sendBadRequest(res, 'teacherId обязателен');
+    }
 
     const { data: teacherGroups, error: tgError } = await supabase
       .from('teacher_groups')
@@ -283,10 +377,10 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       .eq('teacher_id', teacherId);
 
     if (tgError) {
-      return res.status(400).json(tgError);
+      return sendBadRequest(res, tgError);
     }
 
-    const groupIds = (teacherGroups || []).map(g => g.group_id);
+    const groupIds = (teacherGroups || []).map(item => item.group_id);
 
     if (!groupIds.length) {
       return res.json([]);
@@ -298,10 +392,10 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       .in('group_id', groupIds);
 
     if (hwError) {
-      return res.status(400).json(hwError);
+      return sendBadRequest(res, hwError);
     }
 
-    const homeworkIds = (homeworkData || []).map(h => h.id);
+    const homeworkIds = (homeworkData || []).map(item => item.id);
 
     if (!homeworkIds.length) {
       return res.json([]);
@@ -316,14 +410,14 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       .order('submitted_at', { ascending: false });
 
     if (subError) {
-      return res.status(400).json(subError);
+      return sendBadRequest(res, subError);
     }
 
-    if (!submissions || !submissions.length) {
+    if (!submissions?.length) {
       return res.json([]);
     }
 
-    const studentIds = submissions.map(s => s.student_id);
+    const studentIds = submissions.map(item => item.student_id);
 
     const { data: students, error: stError } = await supabase
       .from('profiles')
@@ -331,7 +425,7 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       .in('id', studentIds);
 
     if (stError) {
-      return res.status(400).json(stError);
+      return sendBadRequest(res, stError);
     }
 
     const { data: groupsData, error: groupsError } = await supabase
@@ -340,13 +434,13 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       .in('id', groupIds);
 
     if (groupsError) {
-      return res.status(400).json(groupsError);
+      return sendBadRequest(res, groupsError);
     }
 
     const result = submissions.map(sub => {
-      const hw = (homeworkData || []).find(h => h.id === sub.homework_id);
-      const student = (students || []).find(s => s.id === sub.student_id);
-      const group = (groupsData || []).find(g => g.id === hw?.group_id);
+      const hw = (homeworkData || []).find(item => item.id === sub.homework_id);
+      const student = (students || []).find(item => item.id === sub.student_id);
+      const group = (groupsData || []).find(item => item.id === hw?.group_id);
 
       return {
         submission_id: sub.id,
@@ -366,28 +460,24 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       };
     });
 
-    res.json(result);
+    return res.json(result);
   } catch (err) {
-    console.error('Ошибка /api/teacher/homework/pending/:teacherId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/teacher/homework/pending/:teacherId', err);
   }
 });
 
-// Проверка домашки учителем
+// Проверка ДЗ учителем
 app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
   try {
-    const { submissionId } = req.params;
-    const { grade, teacher_comment } = req.body;
-
-    if (grade === undefined || grade === null || Number.isNaN(Number(grade))) {
-      return res.status(400).json({ error: 'Оценка обязательна' });
-    }
+    const submissionId = parseNumber(req.params.submissionId, 'submissionId', { required: true });
+    const grade = parseNumber(req.body.grade, 'grade', { required: true });
+    const teacher_comment = parseString(req.body.teacher_comment);
 
     const { data, error } = await supabase
       .from('homework_submissions')
       .update({
-        grade: Number(grade),
-        teacher_comment: teacher_comment || null,
+        grade,
+        teacher_comment,
         status: 'reviewed',
         reviewed_at: new Date().toISOString()
       })
@@ -396,44 +486,94 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
       .single();
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json({ message: 'Домашнее задание проверено', submission: data });
+    return res.json({
+      message: 'Домашнее задание проверено',
+      submission: data
+    });
   } catch (err) {
-    console.error('Ошибка /api/teacher/homework/review/:submissionId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/teacher/homework/review/:submissionId', err);
   }
 });
 
-/* =========================
+/* =========================================================
    ADMIN / USERS
-========================= */
+========================================================= */
 
 app.get('/api/admin/users', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('profiles')
-      .select('*, groups(name)');
+      .select('id, full_name, role, group_id, can_edit_news')
+      .order('full_name', { ascending: true });
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
-    console.error('Ошибка /api/admin/users:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/admin/users', err);
   }
 });
 
-/* =========================
+app.put('/api/admin/users/:userId/access', async (req, res) => {
+  try {
+    const userId = parseString(req.params.userId);
+    const role = parseString(req.body.role);
+    const can_edit_news = parseBoolean(req.body.can_edit_news);
+
+    if (!userId) {
+      return sendBadRequest(res, 'userId обязателен');
+    }
+
+    const allowedRoles = ['student', 'teacher', 'admin'];
+
+    if (!role || !allowedRoles.includes(role)) {
+      return sendBadRequest(res, 'Некорректная роль');
+    }
+
+    let group_id = null;
+
+    if (req.body.group_id !== undefined && req.body.group_id !== null && req.body.group_id !== '') {
+      group_id = parseNumber(req.body.group_id, 'group_id', { required: false, allowNull: true });
+    }
+
+    const payload = {
+      role,
+      group_id,
+      can_edit_news
+    };
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('id', userId)
+      .select('id, full_name, role, group_id, can_edit_news')
+      .single();
+
+    if (error) {
+      return sendBadRequest(res, error);
+    }
+
+    return res.json({
+      message: 'Права пользователя обновлены',
+      user: data
+    });
+  } catch (err) {
+    return sendServerError(res, '/api/admin/users/:userId/access', err);
+  }
+});
+
+/* =========================================================
    SCHEDULE
-========================= */
+========================================================= */
 
 app.get('/api/schedule/:groupId', async (req, res) => {
   try {
-    const { groupId } = req.params;
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
 
     const { data, error } = await supabase
       .from('schedule')
@@ -450,19 +590,18 @@ app.get('/api/schedule/:groupId', async (req, res) => {
       .order('lesson_number', { ascending: true });
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
-    console.error('Ошибка /api/schedule/:groupId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/schedule/:groupId', err);
   }
 });
 
-/* =========================
+/* =========================================================
    NEWS
-========================= */
+========================================================= */
 
 app.get('/api/news', async (req, res) => {
   try {
@@ -472,26 +611,122 @@ app.get('/api/news', async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
-    console.error('Ошибка /api/news:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/news', err);
   }
 });
 
-/* =========================
+app.post('/api/news', async (req, res) => {
+  try {
+    const title = parseString(req.body.title);
+    const description = parseString(req.body.description);
+    const image_url = parseString(req.body.image_url);
+    const date_start = parseString(req.body.date_start);
+    const date_end = parseString(req.body.date_end);
+    const created_by = parseString(req.body.created_by);
+
+    if (!title) {
+      return sendBadRequest(res, 'Заголовок обязателен');
+    }
+
+    const payload = {
+      title,
+      description,
+      image_url,
+      date_start,
+      date_end,
+      created_by
+    };
+
+    const { data, error } = await supabase
+      .from('news')
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      return sendBadRequest(res, error);
+    }
+
+    return res.status(201).json({
+      message: 'Новость опубликована',
+      news: data
+    });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/news', err);
+  }
+});
+
+app.put('/api/news/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const title = parseString(req.body.title);
+    const description = parseString(req.body.description);
+    const image_url = parseString(req.body.image_url);
+    const date_start = parseString(req.body.date_start);
+    const date_end = parseString(req.body.date_end);
+
+    const payload = {
+      title,
+      description,
+      image_url,
+      date_start,
+      date_end
+    };
+
+    const { data, error } = await supabase
+      .from('news')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      return sendBadRequest(res, error);
+    }
+
+    return res.json({
+      message: 'Новость обновлена',
+      news: data
+    });
+  } catch (err) {
+    return sendServerError(res, 'PUT /api/news/:id', err);
+  }
+});
+
+app.delete('/api/news/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+
+    const { error } = await supabase
+      .from('news')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      return sendBadRequest(res, error);
+    }
+
+    return res.json({ message: 'Новость удалена' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/news/:id', err);
+  }
+});
+
+/* =========================================================
    TEACHER
-========================= */
+========================================================= */
 
 app.get('/api/teacher/groups/:teacherId', async (req, res) => {
   try {
-    const teacherId = req.params.teacherId;
+    const teacherId = parseString(req.params.teacherId);
 
     if (!teacherId) {
-      return res.status(400).json({ error: 'Некорректный teacherId' });
+      return sendBadRequest(res, 'Некорректный teacherId');
     }
 
     const { data, error } = await supabase
@@ -500,23 +735,22 @@ app.get('/api/teacher/groups/:teacherId', async (req, res) => {
       .eq('teacher_id', teacherId);
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
     const groups = (data || [])
       .map(item => item.groups)
       .filter(Boolean);
 
-    res.json(groups);
+    return res.json(groups);
   } catch (err) {
-    console.error('Ошибка /api/teacher/groups/:teacherId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/teacher/groups/:teacherId', err);
   }
 });
 
 app.get('/api/teacher/students/:groupId', async (req, res) => {
   try {
-    const { groupId } = req.params;
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
 
     const { data, error } = await supabase
       .from('profiles')
@@ -526,40 +760,34 @@ app.get('/api/teacher/students/:groupId', async (req, res) => {
       .order('full_name', { ascending: true });
 
     if (error) {
-      return res.status(400).json(error);
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
-    console.error('Ошибка /api/teacher/students/:groupId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/teacher/students/:groupId', err);
   }
 });
 
-/* =========================
+/* =========================================================
    STATISTICS
-========================= */
+========================================================= */
 
 app.get('/api/statistics/:groupId', async (req, res) => {
   try {
-    const groupId = Number(req.params.groupId);
-    const teacherId = req.query.teacherId || null;
-    const month = req.query.month || null;
-
-    if (!groupId) {
-      return res.status(400).json({ error: 'Некорректный groupId' });
-    }
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
+    const teacherId = parseString(req.query.teacherId);
+    const month = parseString(req.query.month);
 
     let groupName = `Группа ${groupId}`;
     let students = [];
     let grades = [];
     let days = [];
     let monthLabel = '';
+    let selectedMonth = month || null;
 
     if (teacherId && month) {
-      if (!/^\d{4}-\d{2}$/.test(month)) {
-        return res.status(400).json({ error: 'month должен быть в формате YYYY-MM' });
-      }
+      const monthInfo = getMonthRange(month);
 
       const { data: teacherGroup, error: teacherGroupError } = await supabase
         .from('teacher_groups')
@@ -569,11 +797,11 @@ app.get('/api/statistics/:groupId', async (req, res) => {
         .maybeSingle();
 
       if (teacherGroupError) {
-        return res.status(400).json(teacherGroupError);
+        return sendBadRequest(res, teacherGroupError);
       }
 
       if (!teacherGroup) {
-        return res.status(403).json({ error: 'Эта группа не принадлежит преподавателю' });
+        return sendForbidden(res, 'Эта группа не принадлежит преподавателю');
       }
 
       groupName = teacherGroup.groups?.name || `Группа ${groupId}`;
@@ -586,35 +814,26 @@ app.get('/api/statistics/:groupId', async (req, res) => {
         .order('full_name', { ascending: true });
 
       if (studentsError) {
-        return res.status(400).json(studentsError);
+        return sendBadRequest(res, studentsError);
       }
 
       students = studentsData || [];
-
-      const [year, monthNum] = month.split('-').map(Number);
-      const startDate = new Date(year, monthNum - 1, 1);
-      const endDate = new Date(year, monthNum, 1);
-
-      const startISO = startDate.toISOString();
-      const endISO = endDate.toISOString();
-
-      const daysInMonth = new Date(year, monthNum, 0).getDate();
-      days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
-      monthLabel = `${String(monthNum).padStart(2, '0')}.${year}`;
 
       const { data: gradesData, error: gradesError } = await supabase
         .from('journal')
         .select('student_id, grade, created_at')
         .eq('group_id', groupId)
-        .gte('created_at', startISO)
-        .lt('created_at', endISO)
+        .gte('created_at', monthInfo.startISO)
+        .lt('created_at', monthInfo.endISO)
         .order('created_at', { ascending: true });
 
       if (gradesError) {
-        return res.status(400).json(gradesError);
+        return sendBadRequest(res, gradesError);
       }
 
       grades = gradesData || [];
+      days = Array.from({ length: monthInfo.daysInMonth }, (_, i) => i + 1);
+      monthLabel = monthInfo.monthLabel;
     } else {
       const { data: groupData, error: groupError } = await supabase
         .from('groups')
@@ -634,7 +853,7 @@ app.get('/api/statistics/:groupId', async (req, res) => {
         .order('full_name', { ascending: true });
 
       if (studentsError) {
-        return res.status(400).json(studentsError);
+        return sendBadRequest(res, studentsError);
       }
 
       students = studentsData || [];
@@ -646,7 +865,7 @@ app.get('/api/statistics/:groupId', async (req, res) => {
         .order('created_at', { ascending: true });
 
       if (gradesError) {
-        return res.status(400).json(gradesError);
+        return sendBadRequest(res, gradesError);
       }
 
       grades = gradesData || [];
@@ -661,7 +880,7 @@ app.get('/api/statistics/:groupId', async (req, res) => {
     }
 
     const studentsResult = students.map(student => {
-      const studentGrades = grades.filter(g => g.student_id === student.id);
+      const studentGrades = grades.filter(item => item.student_id === student.id);
       const gradesByDay = {};
 
       for (const item of studentGrades) {
@@ -675,17 +894,18 @@ app.get('/api/statistics/:groupId', async (req, res) => {
       }
 
       const normalizedGradesByDay = {};
+
       for (const day of Object.keys(gradesByDay)) {
         normalizedGradesByDay[day] =
           gradesByDay[day].length === 1 ? gradesByDay[day][0] : gradesByDay[day];
       }
 
       const flatGrades = studentGrades
-        .map(g => Number(g.grade))
-        .filter(g => !isNaN(g));
+        .map(item => Number(item.grade))
+        .filter(item => !Number.isNaN(item));
 
       const averageGrade = flatGrades.length
-        ? Math.round(flatGrades.reduce((a, b) => a + b, 0) / flatGrades.length)
+        ? Math.round(flatGrades.reduce((sum, grade) => sum + grade, 0) / flatGrades.length)
         : 0;
 
       return {
@@ -697,204 +917,49 @@ app.get('/api/statistics/:groupId', async (req, res) => {
     });
 
     const allGrades = grades
-      .map(g => Number(g.grade))
-      .filter(g => !isNaN(g));
+      .map(item => Number(item.grade))
+      .filter(item => !Number.isNaN(item));
 
     const groupAvg = allGrades.length
-      ? Math.round(allGrades.reduce((a, b) => a + b, 0) / allGrades.length)
+      ? Math.round(allGrades.reduce((sum, grade) => sum + grade, 0) / allGrades.length)
       : 0;
 
-    res.json({
+    return res.json({
       group_id: groupId,
       group_name: groupName,
-      month: month || null,
+      month: selectedMonth,
       month_label: monthLabel,
       days,
       average_grade: groupAvg,
       students: studentsResult
     });
   } catch (err) {
-    console.error('Ошибка /api/statistics/:groupId:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/statistics/:groupId', err);
   }
 });
 
-app.get('/api/admin/users', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, full_name, role, group_id, can_edit_news')
-      .order('full_name', { ascending: true });
-
-    if (error) {
-      return res.status(400).json(error);
-    }
-
-    res.json(data || []);
-  } catch (err) {
-    console.error('Ошибка /api/admin/users:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/admin/users/:userId/access', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { role, group_id, can_edit_news } = req.body;
-
-    if (!userId) {
-      return res.status(400).json({ error: 'userId обязателен' });
-    }
-
-    const allowedRoles = ['student', 'teacher', 'admin'];
-
-    if (!role || !allowedRoles.includes(role)) {
-      return res.status(400).json({ error: 'Некорректная роль' });
-    }
-
-    const payload = {
-      role,
-      group_id: group_id ? Number(group_id) : null,
-      can_edit_news: !!can_edit_news
-    };
-
-    const { data, error } = await supabase
-      .from('profiles')
-      .update(payload)
-      .eq('id', userId)
-      .select('id, full_name, role, group_id, can_edit_news')
-      .single();
-
-    if (error) {
-      return res.status(400).json(error);
-    }
-
-    res.json({
-      message: 'Права пользователя обновлены',
-      user: data
-    });
-  } catch (err) {
-    console.error('Ошибка /api/admin/users/:userId/access:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/news', async (req, res) => {
-  try {
-    const { title, description, image_url, date_start, date_end, created_by } = req.body;
-
-    if (!title) {
-      return res.status(400).json({ error: 'Заголовок обязателен' });
-    }
-
-    const payload = {
-      title,
-      description: description || null,
-      image_url: image_url || null,
-      date_start: date_start || null,
-      date_end: date_end || null,
-      created_by: created_by || null
-    };
-
-    const { data, error } = await supabase
-      .from('news')
-      .insert([payload])
-      .select()
-      .single();
-
-    if (error) {
-      return res.status(400).json(error);
-    }
-
-    res.status(201).json({
-      message: 'Новость опубликована',
-      news: data
-    });
-  } catch (err) {
-    console.error('Ошибка POST /api/news:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/news/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title, description, image_url, date_start, date_end } = req.body;
-
-    const payload = {
-      title,
-      description: description || null,
-      image_url: image_url || null,
-      date_start: date_start || null,
-      date_end: date_end || null
-    };
-
-    const { data, error } = await supabase
-      .from('news')
-      .update(payload)
-      .eq('id', Number(id))
-      .select()
-      .single();
-
-    if (error) {
-      return res.status(400).json(error);
-    }
-
-    res.json({
-      message: 'Новость обновлена',
-      news: data
-    });
-  } catch (err) {
-    console.error('Ошибка PUT /api/news/:id:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/news/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const { error } = await supabase
-      .from('news')
-      .delete()
-      .eq('id', Number(id));
-
-    if (error) {
-      return res.status(400).json(error);
-    }
-
-    res.json({ message: 'Новость удалена' });
-  } catch (err) {
-    console.error('Ошибка DELETE /api/news/:id:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* =========================
-   AVATAR UPLOAD
-========================= */
+/* =========================================================
+   PROFILE / AVATAR
+========================================================= */
 
 app.post('/api/avatar/upload', upload.single('avatar'), async (req, res) => {
   try {
-    const { userId } = req.body;
+    const userId = parseString(req.body.userId);
     const file = req.file;
 
     if (!userId) {
-      return res.status(400).json({ error: 'userId обязателен' });
+      if (file?.path) await removeTempFile(file.path);
+      return sendBadRequest(res, 'userId обязателен');
     }
 
     if (!file) {
-      return res.status(400).json({ error: 'Файл не загружен' });
+      return sendBadRequest(res, 'Файл не загружен');
     }
 
-    // читаем файл
-    const fs = require('fs');
-    const fileBuffer = fs.readFileSync(file.path);
+    const fileBuffer = await fs.promises.readFile(file.path);
+    const fileExt = path.extname(file.originalname) || '';
+    const fileName = `${userId}_${Date.now()}${fileExt}`;
 
-    const fileExt = file.originalname.split('.').pop();
-    const fileName = `${userId}_${Date.now()}.${fileExt}`;
-
-    // грузим в supabase storage
     const { error: uploadError } = await supabase.storage
       .from('avatars')
       .upload(fileName, fileBuffer, {
@@ -902,19 +967,19 @@ app.post('/api/avatar/upload', upload.single('avatar'), async (req, res) => {
         upsert: true
       });
 
+    await removeTempFile(file.path);
+
     if (uploadError) {
       console.error(uploadError);
       return res.status(500).json({ error: 'Ошибка загрузки в storage' });
     }
 
-    // получаем публичную ссылку
-    const { data } = supabase.storage
+    const { data: publicUrlData } = supabase.storage
       .from('avatars')
       .getPublicUrl(fileName);
 
-    const publicUrl = data.publicUrl;
+    const publicUrl = publicUrlData.publicUrl;
 
-    // сохраняем в profiles
     const { error: updateError } = await supabase
       .from('profiles')
       .update({ avatar_url: publicUrl })
@@ -925,24 +990,23 @@ app.post('/api/avatar/upload', upload.single('avatar'), async (req, res) => {
       return res.status(500).json({ error: 'Ошибка обновления профиля' });
     }
 
-    res.json({
+    return res.json({
       message: 'Аватар загружен',
       avatar_url: publicUrl
     });
-
   } catch (err) {
-    console.error('Ошибка /api/avatar/upload:', err);
-    res.status(500).json({ error: err.message });
+    if (req.file?.path) await removeTempFile(req.file.path);
+    return sendServerError(res, '/api/avatar/upload', err);
   }
 });
 
-/* =========================
-   PROFILE
-========================= */
-
 app.get('/api/profile/:id', async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = parseString(req.params.id);
+
+    if (!id) {
+      return sendBadRequest(res, 'id обязателен');
+    }
 
     const { data, error } = await supabase
       .from('profiles')
@@ -951,20 +1015,26 @@ app.get('/api/profile/:id', async (req, res) => {
       .maybeSingle();
 
     if (error) {
-      console.error(error);
-      return res.status(400).json({ error: error.message });
+      return sendBadRequest(res, error);
     }
 
-    res.json(data || {});
+    return res.json(data || {});
   } catch (err) {
-    console.error('Ошибка /api/profile:', err);
-    res.status(500).json({ error: err.message });
+    return sendServerError(res, '/api/profile/:id', err);
   }
 });
 
+/* =========================================================
+   REDIRECT / COMPAT
+========================================================= */
+
 app.get('/api/statistic/:groupId', async (req, res) => {
-  res.redirect(`/api/statistics/${req.params.groupId}`);
+  return res.redirect(`/api/statistics/${req.params.groupId}`);
 });
+
+/* =========================================================
+   START
+========================================================= */
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер пашет на порту ${PORT}`);
