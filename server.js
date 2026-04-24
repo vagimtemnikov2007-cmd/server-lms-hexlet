@@ -180,7 +180,6 @@ app.get('/api/homework/:groupId', async (req, res) => {
       .from('homework')
       .select('*')
       .eq('group_id', groupId)
-      .eq('is_archived', false)
       .order('id', { ascending: false });
 
     if (error) {
@@ -207,7 +206,6 @@ app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
       .from('homework')
       .select('*')
       .eq('group_id', groupId)
-      .eq('is_archived', false)
       .order('id', { ascending: false });
 
     if (hwError) {
@@ -391,8 +389,7 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
     const { data: homeworkData, error: hwError } = await supabase
       .from('homework')
       .select('*')
-      .in('group_id', groupIds)
-      .eq('is_archived', false);
+      .in('group_id', groupIds);
 
     if (hwError) {
       return sendBadRequest(res, hwError);
@@ -498,65 +495,6 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
     });
   } catch (err) {
     return sendServerError(res, '/api/teacher/homework/review/:submissionId', err);
-  }
-});
-
-
-/* =========================================================
-   HOMEWORK ARCHIVE
-========================================================= */
-
-app.get('/api/homework/archive/:groupId', async (req, res) => {
-  try {
-    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
-
-    const { data, error } = await supabase
-      .from('homework')
-      .select('*')
-      .eq('group_id', groupId)
-      .eq('is_archived', true)
-      .order('archived_at', { ascending: false });
-
-    if (error) return sendBadRequest(res, error);
-    return res.json(data || []);
-  } catch (err) {
-    return sendServerError(res, '/api/homework/archive/:groupId', err);
-  }
-});
-
-app.put('/api/homework/:id/archive', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-
-    const { data, error } = await supabase
-      .from('homework')
-      .update({ is_archived: true, archived_at: new Date().toISOString() })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Домашнее задание перенесено в архив', homework: data });
-  } catch (err) {
-    return sendServerError(res, '/api/homework/:id/archive', err);
-  }
-});
-
-app.put('/api/homework/:id/restore', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-
-    const { data, error } = await supabase
-      .from('homework')
-      .update({ is_archived: false, archived_at: null })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Домашнее задание восстановлено', homework: data });
-  } catch (err) {
-    return sendServerError(res, '/api/homework/:id/restore', err);
   }
 });
 
@@ -666,22 +604,62 @@ async function enrichNewsList(newsItems, userId = null) {
   const items = newsItems || [];
   if (!items.length) return [];
 
-  const ids = items.map(item => item.id);
+  const newsIds = items.map(item => item.id);
 
-  const [{ data: likes }, { data: comments }] = await Promise.all([
-    supabase.from('news_likes').select('news_id, user_id').in('news_id', ids),
-    supabase.from('news_comments').select('news_id').in('news_id', ids)
+  const [{ data: reactionRows }, { data: commentRows }] = await Promise.all([
+    supabase.from('news_reactions').select('news_id, user_id, reaction_type').in('news_id', newsIds),
+    supabase.from('news_comments').select('news_id').in('news_id', newsIds)
   ]);
 
   return items.map(item => {
-    const itemLikes = (likes || []).filter(like => like.news_id === item.id);
-    const itemComments = (comments || []).filter(comment => comment.news_id === item.id);
+    const reactionsForItem = (reactionRows || []).filter(row => row.news_id === item.id);
+    const reactionTypes = ['like', 'heart', 'laugh', 'wow', 'sad'];
+
+    const reactions = reactionTypes.map(type => ({
+      reaction_type: type,
+      count: reactionsForItem.filter(row => row.reaction_type === type).length
+    }));
+
+    const myReaction = userId
+      ? reactionsForItem.find(row => row.user_id === userId)?.reaction_type || null
+      : null;
 
     return {
       ...item,
-      likes_count: itemLikes.length,
-      comments_count: itemComments.length,
-      liked_by_me: userId ? itemLikes.some(like => like.user_id === userId) : false
+      reactions,
+      my_reaction: myReaction,
+      comments_count: (commentRows || []).filter(row => row.news_id === item.id).length
+    };
+  });
+}
+
+async function enrichCommentsList(comments, userId = null) {
+  const items = comments || [];
+  if (!items.length) return [];
+
+  const commentIds = items.map(item => item.id);
+
+  const { data: reactionRows, error } = await supabase
+    .from('news_comment_reactions')
+    .select('comment_id, user_id, reaction_type')
+    .in('comment_id', commentIds);
+
+  if (error) throw error;
+
+  const reactionTypes = ['like', 'heart', 'laugh', 'wow', 'sad'];
+
+  return items.map(item => {
+    const reactionsForItem = (reactionRows || []).filter(row => row.comment_id === item.id);
+
+    return {
+      ...item,
+      reactions: reactionTypes.map(type => ({
+        reaction_type: type,
+        count: reactionsForItem.filter(row => row.reaction_type === type).length
+      })),
+      my_reaction: userId
+        ? reactionsForItem.find(row => row.user_id === userId)?.reaction_type || null
+        : null
     };
   });
 }
@@ -697,7 +675,6 @@ app.get('/api/news', async (req, res) => {
     const { data, error } = await supabase
       .from('news')
       .select('*')
-      .eq('is_archived', false)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -808,99 +785,65 @@ app.delete('/api/news/:id', async (req, res) => {
 });
 
 
-app.get('/api/news/archive', async (req, res) => {
-  try {
-    const userId = parseString(req.query.user_id);
-
-    const { data, error } = await supabase
-      .from('news')
-      .select('*')
-      .eq('is_archived', true)
-      .order('archived_at', { ascending: false });
-
-    if (error) return sendBadRequest(res, error);
-    return res.json(await enrichNewsList(data || [], userId));
-  } catch (err) {
-    return sendServerError(res, '/api/news/archive', err);
-  }
-});
-
-app.put('/api/news/:id/archive', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-
-    const { data, error } = await supabase
-      .from('news')
-      .update({ is_archived: true, archived_at: new Date().toISOString() })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Новость перенесена в архив', news: data });
-  } catch (err) {
-    return sendServerError(res, '/api/news/:id/archive', err);
-  }
-});
-
-app.put('/api/news/:id/restore', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-
-    const { data, error } = await supabase
-      .from('news')
-      .update({ is_archived: false, archived_at: null })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Новость восстановлена', news: data });
-  } catch (err) {
-    return sendServerError(res, '/api/news/:id/restore', err);
-  }
-});
-
-app.post('/api/news/:id/like', async (req, res) => {
+app.post('/api/news/:id/reaction', async (req, res) => {
   try {
     const news_id = parseNumber(req.params.id, 'news_id', { required: true });
     const user_id = parseString(req.body.user_id);
+    const reaction_type = parseString(req.body.reaction_type);
+
+    const allowed = ['like', 'heart', 'laugh', 'wow', 'sad'];
 
     if (!user_id) return sendBadRequest(res, 'user_id обязателен');
+    if (!allowed.includes(reaction_type)) return sendBadRequest(res, 'Некорректная реакция');
 
     const { data: existing, error: findError } = await supabase
-      .from('news_likes')
-      .select('id')
+      .from('news_reactions')
+      .select('id, reaction_type')
       .eq('news_id', news_id)
       .eq('user_id', user_id)
       .maybeSingle();
 
     if (findError) return sendBadRequest(res, findError);
 
-    if (existing) {
+    if (existing && existing.reaction_type === reaction_type) {
       const { error } = await supabase
-        .from('news_likes')
+        .from('news_reactions')
         .delete()
         .eq('id', existing.id);
 
       if (error) return sendBadRequest(res, error);
-      return res.json({ liked: false });
+      return res.json({ reaction: null });
     }
 
-    const { error } = await supabase
-      .from('news_likes')
-      .insert([{ news_id, user_id }]);
+    if (existing) {
+      const { data, error } = await supabase
+        .from('news_reactions')
+        .update({ reaction_type })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (error) return sendBadRequest(res, error);
+      return res.json({ reaction: data });
+    }
+
+    const { data, error } = await supabase
+      .from('news_reactions')
+      .insert([{ news_id, user_id, reaction_type }])
+      .select()
+      .single();
 
     if (error) return sendBadRequest(res, error);
-    return res.json({ liked: true });
+    return res.status(201).json({ reaction: data });
   } catch (err) {
-    return sendServerError(res, '/api/news/:id/like', err);
+    return sendServerError(res, '/api/news/:id/reaction', err);
   }
 });
 
 app.get('/api/news/:id/comments', async (req, res) => {
   try {
     const news_id = parseNumber(req.params.id, 'news_id', { required: true });
+    const userId = parseString(req.query.user_id);
 
     const { data, error } = await supabase
       .from('news_comments')
@@ -920,7 +863,7 @@ app.get('/api/news/:id/comments', async (req, res) => {
       .order('created_at', { ascending: true });
 
     if (error) return sendBadRequest(res, error);
-    return res.json(data || []);
+    return res.json(await enrichCommentsList(data || [], userId));
   } catch (err) {
     return sendServerError(res, '/api/news/:id/comments', err);
   }
@@ -975,6 +918,61 @@ app.delete('/api/news/comments/:commentId', async (req, res) => {
     return res.json({ message: 'Комментарий удалён' });
   } catch (err) {
     return sendServerError(res, '/api/news/comments/:commentId DELETE', err);
+  }
+});
+
+app.post('/api/news/comments/:commentId/reaction', async (req, res) => {
+  try {
+    const comment_id = parseNumber(req.params.commentId, 'commentId', { required: true });
+    const user_id = parseString(req.body.user_id);
+    const reaction_type = parseString(req.body.reaction_type);
+
+    const allowed = ['like', 'heart', 'laugh', 'wow', 'sad'];
+
+    if (!user_id) return sendBadRequest(res, 'user_id обязателен');
+    if (!allowed.includes(reaction_type)) return sendBadRequest(res, 'Некорректная реакция');
+
+    const { data: existing, error: findError } = await supabase
+      .from('news_comment_reactions')
+      .select('id, reaction_type')
+      .eq('comment_id', comment_id)
+      .eq('user_id', user_id)
+      .maybeSingle();
+
+    if (findError) return sendBadRequest(res, findError);
+
+    if (existing && existing.reaction_type === reaction_type) {
+      const { error } = await supabase
+        .from('news_comment_reactions')
+        .delete()
+        .eq('id', existing.id);
+
+      if (error) return sendBadRequest(res, error);
+      return res.json({ reaction: null });
+    }
+
+    if (existing) {
+      const { data, error } = await supabase
+        .from('news_comment_reactions')
+        .update({ reaction_type })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (error) return sendBadRequest(res, error);
+      return res.json({ reaction: data });
+    }
+
+    const { data, error } = await supabase
+      .from('news_comment_reactions')
+      .insert([{ comment_id, user_id, reaction_type }])
+      .select()
+      .single();
+
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ reaction: data });
+  } catch (err) {
+    return sendServerError(res, '/api/news/comments/:commentId/reaction', err);
   }
 });
 
