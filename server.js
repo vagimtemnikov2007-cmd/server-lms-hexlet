@@ -123,7 +123,7 @@ app.post('/api/login', async (req, res) => {
 
     const { data: user, error } = await supabase
       .from('profiles')
-      .select('id, role, full_name, group_id, course, specialization, iin, password, can_edit_news')
+      .select('id, role, full_name, group_id, course, specialization, iin, password, can_edit_news, avatar_url')
       .eq('iin', iin)
       .maybeSingle();
 
@@ -180,6 +180,7 @@ app.get('/api/homework/:groupId', async (req, res) => {
       .from('homework')
       .select('*')
       .eq('group_id', groupId)
+      .eq('is_archived', false)
       .order('id', { ascending: false });
 
     if (error) {
@@ -206,6 +207,7 @@ app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
       .from('homework')
       .select('*')
       .eq('group_id', groupId)
+      .eq('is_archived', false)
       .order('id', { ascending: false });
 
     if (hwError) {
@@ -389,7 +391,8 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
     const { data: homeworkData, error: hwError } = await supabase
       .from('homework')
       .select('*')
-      .in('group_id', groupIds);
+      .in('group_id', groupIds)
+      .eq('is_archived', false);
 
     if (hwError) {
       return sendBadRequest(res, hwError);
@@ -498,6 +501,65 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
   }
 });
 
+
+/* =========================================================
+   HOMEWORK ARCHIVE
+========================================================= */
+
+app.get('/api/homework/archive/:groupId', async (req, res) => {
+  try {
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
+
+    const { data, error } = await supabase
+      .from('homework')
+      .select('*')
+      .eq('group_id', groupId)
+      .eq('is_archived', true)
+      .order('archived_at', { ascending: false });
+
+    if (error) return sendBadRequest(res, error);
+    return res.json(data || []);
+  } catch (err) {
+    return sendServerError(res, '/api/homework/archive/:groupId', err);
+  }
+});
+
+app.put('/api/homework/:id/archive', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+
+    const { data, error } = await supabase
+      .from('homework')
+      .update({ is_archived: true, archived_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Домашнее задание перенесено в архив', homework: data });
+  } catch (err) {
+    return sendServerError(res, '/api/homework/:id/archive', err);
+  }
+});
+
+app.put('/api/homework/:id/restore', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+
+    const { data, error } = await supabase
+      .from('homework')
+      .update({ is_archived: false, archived_at: null })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Домашнее задание восстановлено', homework: data });
+  } catch (err) {
+    return sendServerError(res, '/api/homework/:id/restore', err);
+  }
+});
+
 /* =========================================================
    ADMIN / USERS
 ========================================================= */
@@ -599,22 +661,50 @@ app.get('/api/schedule/:groupId', async (req, res) => {
   }
 });
 
+
+async function enrichNewsList(newsItems, userId = null) {
+  const items = newsItems || [];
+  if (!items.length) return [];
+
+  const ids = items.map(item => item.id);
+
+  const [{ data: likes }, { data: comments }] = await Promise.all([
+    supabase.from('news_likes').select('news_id, user_id').in('news_id', ids),
+    supabase.from('news_comments').select('news_id').in('news_id', ids)
+  ]);
+
+  return items.map(item => {
+    const itemLikes = (likes || []).filter(like => like.news_id === item.id);
+    const itemComments = (comments || []).filter(comment => comment.news_id === item.id);
+
+    return {
+      ...item,
+      likes_count: itemLikes.length,
+      comments_count: itemComments.length,
+      liked_by_me: userId ? itemLikes.some(like => like.user_id === userId) : false
+    };
+  });
+}
+
 /* =========================================================
    NEWS
 ========================================================= */
 
 app.get('/api/news', async (req, res) => {
   try {
+    const userId = parseString(req.query.user_id);
+
     const { data, error } = await supabase
       .from('news')
       .select('*')
+      .eq('is_archived', false)
       .order('created_at', { ascending: false });
 
     if (error) {
       return sendBadRequest(res, error);
     }
 
-    return res.json(data || []);
+    return res.json(await enrichNewsList(data || [], userId));
   } catch (err) {
     return sendServerError(res, '/api/news', err);
   }
@@ -714,6 +804,177 @@ app.delete('/api/news/:id', async (req, res) => {
     return res.json({ message: 'Новость удалена' });
   } catch (err) {
     return sendServerError(res, 'DELETE /api/news/:id', err);
+  }
+});
+
+
+app.get('/api/news/archive', async (req, res) => {
+  try {
+    const userId = parseString(req.query.user_id);
+
+    const { data, error } = await supabase
+      .from('news')
+      .select('*')
+      .eq('is_archived', true)
+      .order('archived_at', { ascending: false });
+
+    if (error) return sendBadRequest(res, error);
+    return res.json(await enrichNewsList(data || [], userId));
+  } catch (err) {
+    return sendServerError(res, '/api/news/archive', err);
+  }
+});
+
+app.put('/api/news/:id/archive', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+
+    const { data, error } = await supabase
+      .from('news')
+      .update({ is_archived: true, archived_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Новость перенесена в архив', news: data });
+  } catch (err) {
+    return sendServerError(res, '/api/news/:id/archive', err);
+  }
+});
+
+app.put('/api/news/:id/restore', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+
+    const { data, error } = await supabase
+      .from('news')
+      .update({ is_archived: false, archived_at: null })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Новость восстановлена', news: data });
+  } catch (err) {
+    return sendServerError(res, '/api/news/:id/restore', err);
+  }
+});
+
+app.post('/api/news/:id/like', async (req, res) => {
+  try {
+    const news_id = parseNumber(req.params.id, 'news_id', { required: true });
+    const user_id = parseString(req.body.user_id);
+
+    if (!user_id) return sendBadRequest(res, 'user_id обязателен');
+
+    const { data: existing, error: findError } = await supabase
+      .from('news_likes')
+      .select('id')
+      .eq('news_id', news_id)
+      .eq('user_id', user_id)
+      .maybeSingle();
+
+    if (findError) return sendBadRequest(res, findError);
+
+    if (existing) {
+      const { error } = await supabase
+        .from('news_likes')
+        .delete()
+        .eq('id', existing.id);
+
+      if (error) return sendBadRequest(res, error);
+      return res.json({ liked: false });
+    }
+
+    const { error } = await supabase
+      .from('news_likes')
+      .insert([{ news_id, user_id }]);
+
+    if (error) return sendBadRequest(res, error);
+    return res.json({ liked: true });
+  } catch (err) {
+    return sendServerError(res, '/api/news/:id/like', err);
+  }
+});
+
+app.get('/api/news/:id/comments', async (req, res) => {
+  try {
+    const news_id = parseNumber(req.params.id, 'news_id', { required: true });
+
+    const { data, error } = await supabase
+      .from('news_comments')
+      .select(`
+        id,
+        news_id,
+        user_id,
+        parent_id,
+        text,
+        created_at,
+        profiles (
+          full_name,
+          avatar_url
+        )
+      `)
+      .eq('news_id', news_id)
+      .order('created_at', { ascending: true });
+
+    if (error) return sendBadRequest(res, error);
+    return res.json(data || []);
+  } catch (err) {
+    return sendServerError(res, '/api/news/:id/comments', err);
+  }
+});
+
+app.post('/api/news/:id/comments', async (req, res) => {
+  try {
+    const news_id = parseNumber(req.params.id, 'news_id', { required: true });
+    const user_id = parseString(req.body.user_id);
+    const text = parseString(req.body.text);
+    const parent_id = req.body.parent_id ? parseNumber(req.body.parent_id, 'parent_id') : null;
+
+    if (!user_id) return sendBadRequest(res, 'user_id обязателен');
+    if (!text) return sendBadRequest(res, 'Комментарий не может быть пустым');
+
+    const { data, error } = await supabase
+      .from('news_comments')
+      .insert([{ news_id, user_id, text, parent_id }])
+      .select()
+      .single();
+
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ message: 'Комментарий добавлен', comment: data });
+  } catch (err) {
+    return sendServerError(res, '/api/news/:id/comments POST', err);
+  }
+});
+
+app.delete('/api/news/comments/:commentId', async (req, res) => {
+  try {
+    const commentId = parseNumber(req.params.commentId, 'commentId', { required: true });
+    const userId = parseString(req.body.user_id);
+
+    if (!userId) return sendBadRequest(res, 'user_id обязателен');
+
+    const { data: comment, error: findError } = await supabase
+      .from('news_comments')
+      .select('id, user_id')
+      .eq('id', commentId)
+      .maybeSingle();
+
+    if (findError) return sendBadRequest(res, findError);
+    if (!comment) return res.status(404).json({ error: 'Комментарий не найден' });
+    if (comment.user_id !== userId) return sendForbidden(res, 'Можно удалять только свои комментарии');
+
+    const { error } = await supabase
+      .from('news_comments')
+      .delete()
+      .eq('id', commentId);
+
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Комментарий удалён' });
+  } catch (err) {
+    return sendServerError(res, '/api/news/comments/:commentId DELETE', err);
   }
 });
 
