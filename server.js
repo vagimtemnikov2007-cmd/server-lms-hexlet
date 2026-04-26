@@ -280,58 +280,63 @@ const homeworkStorage = multer.diskStorage({
 const uploadHomework = multer({ storage: homeworkStorage });
 
 app.use("/uploads", express.static("uploads"));
+app.post('/api/homework', async (req, res) => {
+  try {
+    const group_id = Number(req.body.group_id);
+    const subject_id = req.body.subject_id ? Number(req.body.subject_id) : null;
+    const subject_title = String(req.body.subject_title || '').trim();
+    const title = String(req.body.title || '').trim();
+    const description = String(req.body.description || '').trim();
+    const format = String(req.body.format || 'офлайн').trim();
+    const deadline = String(req.body.deadline || '').trim();
 
-app.post("/api/homework", uploadHomework.single("attachment"), async (req, res) => {
-    try {
-        const {
-            group_id,
-            subject_title,
-            title,
-            description,
-            deadline,
-            format
-        } = req.body;
-
-        if (!group_id || !subject_title || !title || !description || !deadline || !format) {
-            return res.status(400).json({ error: "Не все поля заполнены" });
-        }
-
-        const attachmentUrl = req.file
-            ? `${req.protocol}://${req.get("host")}/uploads/homework/${req.file.filename}`
-            : null;
-
-        const attachmentName = req.file
-            ? req.file.originalname
-            : null;
-
-        const { data, error } = await supabase
-            .from("homework")
-            .insert([
-                {
-                    group_id,
-                    subject_title,
-                    title,
-                    description,
-                    deadline,
-                    format,
-                    attachment_url: attachmentUrl,
-                    attachment_name: attachmentName
-                }
-            ])
-            .select();
-
-        if (error) {
-            return res.status(500).json({ error: error.message });
-        }
-
-        res.json(data[0]);
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Ошибка сервера" });
+    if (!group_id) {
+      return res.status(400).json({ error: 'group_id обязателен' });
     }
-});
 
+    if (!title) {
+      return res.status(400).json({ error: 'title обязателен' });
+    }
+
+    if (!description) {
+      return res.status(400).json({ error: 'description обязателен' });
+    }
+
+    if (!deadline) {
+      return res.status(400).json({ error: 'deadline обязателен' });
+    }
+
+    const payload = {
+      group_id,
+      subject_id,
+      subject_title,
+      title,
+      description,
+      format,
+      deadline
+    };
+
+    const { data, error } = await supabase
+      .from('homework')
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase homework insert error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.status(201).json({
+      message: 'Домашнее задание создано',
+      homework: data
+    });
+
+  } catch (err) {
+    console.error('POST /api/homework error:', err);
+    return res.status(500).json({ error: 'Ошибка сервера при создании ДЗ' });
+  }
+});
 // Сдача ДЗ
 app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
   try {
@@ -507,8 +512,8 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
         student_name: student?.full_name || 'Без имени',
         answer_text: sub.answer_text || '',
         file_name: sub.file_name || '',
-        file_path: sub.file_path || '',
-        file_url: sub.file_path || '',
+    file_path: sub.file_path || '',
+    file_url: sub.file_path || '',
         submitted_at: sub.submitted_at,
         status: sub.status
       };
