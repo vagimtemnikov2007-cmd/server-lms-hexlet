@@ -270,6 +270,16 @@ app.post('/api/login', async (req, res) => {
    SUBJECTS
 ========================================================= */
 
+app.get('/api/groups', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('groups').select('id, name').order('name', { ascending: true });
+    if (error) return sendBadRequest(res, error);
+    return res.json(data || []);
+  } catch (err) {
+    return sendServerError(res, '/api/groups', err);
+  }
+});
+
 app.get('/api/subjects', async (req, res) => {
   try {
     const fallback = [
@@ -709,7 +719,14 @@ app.put('/api/admin/users/:userId/access', async (req, res) => {
 app.get('/api/teacher/groups/:teacherId', async (req, res) => {
   try {
     const teacherId = parseString(req.params.teacherId);
+    const role = parseString(req.query.role);
     if (!teacherId) return sendBadRequest(res, 'Некорректный teacherId');
+
+    if (role === 'admin' || role === 'администратор') {
+      const { data, error } = await supabase.from('groups').select('id, name').order('name', { ascending: true });
+      if (error) return sendBadRequest(res, error);
+      return res.json(data || []);
+    }
 
     const { data, error } = await supabase
       .from('teacher_groups')
@@ -747,11 +764,13 @@ app.get('/api/statistics/:groupId', async (req, res) => {
   try {
     const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
     const teacherId = parseString(req.query.teacherId);
+    const requestRole = parseString(req.query.role);
+    const isAdminRequest = requestRole === 'admin' || requestRole === 'администратор';
     const month = parseString(req.query.month);
 
     const monthInfo = getMonthRange(month || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`);
 
-    if (teacherId) {
+    if (teacherId && !isAdminRequest) {
       const { data: teacherGroup, error: tgError } = await supabase
         .from('teacher_groups')
         .select('group_id, groups(name)')
@@ -926,6 +945,20 @@ app.get('/api/news', async (req, res) => {
     return res.json(await enrichNewsList(data || [], userId));
   } catch (err) {
     return sendServerError(res, '/api/news', err);
+  }
+});
+
+app.post('/api/news/upload-image', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return sendBadRequest(res, 'Файл изображения обязателен');
+    if (!req.file.mimetype || !req.file.mimetype.startsWith('image/')) {
+      await removeTempFile(req.file.path);
+      return sendBadRequest(res, 'Можно загружать только изображения');
+    }
+    const imageUrl = req.protocol + '://' + req.get('host') + '/uploads/submissions/' + req.file.filename;
+    return res.status(201).json({ image_url: imageUrl });
+  } catch (err) {
+    return sendServerError(res, '/api/news/upload-image', err);
   }
 });
 
