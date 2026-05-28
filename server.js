@@ -393,8 +393,125 @@ app.delete('/api/journal/:id', async (req, res) => {
 });
 
 /* =========================================================
-   HOMEWORK
+   HOMEWORK MODULES / COURSE TREE V2
 ========================================================= */
+
+function normalizeSection(section) {
+  return {
+    ...section,
+    materials: [],
+    homework: []
+  };
+}
+
+function buildHomeworkModules({ sections = [], materials = [], homework = [], submissions = [] }) {
+  const sectionMap = new Map();
+  const result = [];
+
+  (sections || []).forEach(section => {
+    const normalized = normalizeSection(section);
+    sectionMap.set(Number(section.id), normalized);
+    result.push(normalized);
+  });
+
+  const legacyHomework = [];
+
+  (materials || []).forEach(material => {
+    const section = sectionMap.get(Number(material.section_id));
+    if (section) section.materials.push(material);
+  });
+
+  (homework || []).forEach(hw => {
+    const submission = (submissions || []).find(sub => Number(sub.homework_id) === Number(hw.id)) || null;
+    const normalizedHw = { ...hw, submission };
+    const section = hw.section_id ? sectionMap.get(Number(hw.section_id)) : null;
+
+    if (section) section.homework.push(normalizedHw);
+    else legacyHomework.push(normalizedHw);
+  });
+
+  if (legacyHomework.length) {
+    result.push({
+      id: 'legacy',
+      group_id: legacyHomework[0]?.group_id || null,
+      subject_id: null,
+      subject_title: 'Без раздела',
+      title: 'Без раздела',
+      description: 'Старые задания, которые были созданы до модульной структуры.',
+      order_index: 999999,
+      created_by: null,
+      created_at: null,
+      updated_at: null,
+      is_virtual: true,
+      materials: [],
+      homework: legacyHomework
+    });
+  }
+
+  result.forEach(section => {
+    section.materials.sort((a, b) => (a.order_index || 0) - (b.order_index || 0) || Number(a.id) - Number(b.id));
+    section.homework.sort((a, b) => (a.order_index || 0) - (b.order_index || 0) || Number(a.id) - Number(b.id));
+  });
+
+  return result;
+}
+
+app.get('/api/homework-modules/:groupId', async (req, res) => {
+  try {
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
+    const studentId = parseString(req.query.studentId);
+
+    const [sectionsResult, homeworkResult] = await Promise.all([
+      supabase
+        .from('homework_sections')
+        .select('*')
+        .eq('group_id', groupId)
+        .order('order_index', { ascending: true })
+        .order('id', { ascending: true }),
+      supabase
+        .from('homework')
+        .select('*')
+        .eq('group_id', groupId)
+        .order('order_index', { ascending: true })
+        .order('id', { ascending: true })
+    ]);
+
+    if (sectionsResult.error) return sendBadRequest(res, sectionsResult.error);
+    if (homeworkResult.error) return sendBadRequest(res, homeworkResult.error);
+
+    const sections = sectionsResult.data || [];
+    const homeworkData = homeworkResult.data || [];
+    const sectionIds = sections.map(section => section.id);
+    const homeworkIds = homeworkData.map(hw => hw.id);
+
+    let materials = [];
+    if (sectionIds.length) {
+      const { data, error } = await supabase
+        .from('homework_materials')
+        .select('*')
+        .in('section_id', sectionIds)
+        .order('order_index', { ascending: true })
+        .order('id', { ascending: true });
+      if (error) return sendBadRequest(res, error);
+      materials = data || [];
+    }
+
+    let submissions = [];
+    if (studentId && homeworkIds.length) {
+      const { data, error } = await supabase
+        .from('homework_submissions')
+        .select('*')
+        .eq('student_id', studentId)
+        .in('homework_id', homeworkIds);
+      if (error) return sendBadRequest(res, error);
+      submissions = data || [];
+    }
+
+    return res.json({ sections: buildHomeworkModules({ sections, materials, homework: homeworkData, submissions }) });
+  } catch (err) {
+    return sendServerError(res, '/api/homework-modules/:groupId', err);
+  }
+});
 
 app.get('/api/homework/:groupId', async (req, res) => {
   try {
@@ -403,6 +520,7 @@ app.get('/api/homework/:groupId', async (req, res) => {
       .from('homework')
       .select('*')
       .eq('group_id', groupId)
+      .order('order_index', { ascending: true })
       .order('id', { ascending: false });
     if (error) return sendBadRequest(res, error);
     return res.json(data || []);
@@ -421,6 +539,7 @@ app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
       .from('homework')
       .select('*')
       .eq('group_id', groupId)
+      .order('order_index', { ascending: true })
       .order('id', { ascending: false });
     if (hwError) return sendBadRequest(res, hwError);
 
@@ -443,30 +562,197 @@ app.get('/api/student/homework/:groupId/:studentId', async (req, res) => {
   }
 });
 
-app.post('/api/homework', async (req, res) => {
+app.post('/api/homework-sections', async (req, res) => {
   try {
     const group_id = parseNumber(req.body.group_id, 'group_id', { required: true });
     const subject_title = parseString(req.body.subject_title);
     const subject_id = await getOrCreateSubjectId(subject_title, req.body.subject_id);
     const title = parseString(req.body.title);
     const description = parseString(req.body.description);
-    const format = parseString(req.body.format) || 'офлайн';
+    const order_index = parseNumber(req.body.order_index, 'order_index') ?? 0;
+    const created_by = parseString(req.body.created_by);
+
+    if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
+
+    const payload = { group_id, subject_id, subject_title, title, description, order_index, created_by };
+    const { data, error } = await supabase.from('homework_sections').insert([payload]).select().single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ message: 'Раздел создан', section: data });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/homework-sections', err);
+  }
+});
+
+app.put('/api/homework-sections/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const payload = {
+      title: parseString(req.body.title),
+      description: parseString(req.body.description),
+      subject_title: parseString(req.body.subject_title),
+      order_index: parseNumber(req.body.order_index, 'order_index') ?? 0,
+      updated_at: new Date().toISOString()
+    };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
+    const { data, error } = await supabase.from('homework_sections').update(payload).eq('id', id).select().single();
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Раздел обновлён', section: data });
+  } catch (err) {
+    return sendServerError(res, 'PUT /api/homework-sections/:id', err);
+  }
+});
+
+app.delete('/api/homework-sections/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const { error } = await supabase.from('homework_sections').delete().eq('id', id);
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Раздел удалён' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/homework-sections/:id', err);
+  }
+});
+
+app.post('/api/homework-materials', async (req, res) => {
+  try {
+    const section_id = parseNumber(req.body.section_id, 'section_id', { required: true });
+    const title = parseString(req.body.title);
+    const type = parseString(req.body.type) || 'file';
+    const file_url = parseString(req.body.file_url);
+    const file_name = parseString(req.body.file_name);
+    const content = parseString(req.body.content);
+    const order_index = parseNumber(req.body.order_index, 'order_index') ?? 0;
+    const created_by = parseString(req.body.created_by);
+
+    if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
+
+    const payload = { section_id, title, type, file_url, file_name, content, order_index, created_by };
+    const { data, error } = await supabase.from('homework_materials').insert([payload]).select().single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ message: 'Материал добавлен', material: data });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/homework-materials', err);
+  }
+});
+
+app.put('/api/homework-materials/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const payload = {
+      title: parseString(req.body.title),
+      type: parseString(req.body.type),
+      file_url: parseString(req.body.file_url),
+      file_name: parseString(req.body.file_name),
+      content: parseString(req.body.content),
+      order_index: parseNumber(req.body.order_index, 'order_index'),
+      updated_at: new Date().toISOString()
+    };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
+    const { data, error } = await supabase.from('homework_materials').update(payload).eq('id', id).select().single();
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Материал обновлён', material: data });
+  } catch (err) {
+    return sendServerError(res, 'PUT /api/homework-materials/:id', err);
+  }
+});
+
+app.delete('/api/homework-materials/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const { error } = await supabase.from('homework_materials').delete().eq('id', id);
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Материал удалён' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/homework-materials/:id', err);
+  }
+});
+
+app.post('/api/homework-materials/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return sendBadRequest(res, 'Файл не выбран');
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/submissions/${req.file.filename}`;
+    const fileName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    return res.status(201).json({ file_url: fileUrl, file_name: fileName });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/homework-materials/upload', err);
+  }
+});
+
+app.post('/api/homework-attachments/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return sendBadRequest(res, 'Файл не выбран');
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/submissions/${req.file.filename}`;
+    const fileName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    return res.status(201).json({ attachment_url: fileUrl, attachment_name: fileName, file_url: fileUrl, file_name: fileName });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/homework-attachments/upload', err);
+  }
+});
+
+app.post('/api/homework', async (req, res) => {
+  try {
+    const group_id = parseNumber(req.body.group_id, 'group_id', { required: true });
+    const section_id = parseNumber(req.body.section_id, 'section_id');
+    const subject_title = parseString(req.body.subject_title);
+    const subject_id = await getOrCreateSubjectId(subject_title, req.body.subject_id);
+    const title = parseString(req.body.title);
+    const description = parseString(req.body.description);
+    const format = parseString(req.body.format) || 'онлайн';
     const deadline = parseString(req.body.deadline);
+    const attachment_url = parseString(req.body.attachment_url);
+    const attachment_name = parseString(req.body.attachment_name);
+    const order_index = parseNumber(req.body.order_index, 'order_index') ?? 0;
+    const created_by = parseString(req.body.created_by);
 
     if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
     if (!description) return sendBadRequest(res, t(req, 'errors.description_required'));
     if (!deadline) return sendBadRequest(res, t(req, 'errors.deadline_required'));
 
-    const { data, error } = await supabase
-      .from('homework')
-      .insert([{ group_id, subject_id, subject_title, title, description, format, deadline }])
-      .select()
-      .single();
+    const payload = { group_id, section_id, subject_id, subject_title, title, description, format, deadline, attachment_url, attachment_name, order_index, created_by };
+    const { data, error } = await supabase.from('homework').insert([payload]).select().single();
 
     if (error) return sendBadRequest(res, error);
     return res.status(201).json({ message: t(req, 'homework_created'), homework: data });
   } catch (err) {
     return sendServerError(res, 'POST /api/homework', err);
+  }
+});
+
+app.put('/api/homework/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const payload = {
+      section_id: parseNumber(req.body.section_id, 'section_id'),
+      subject_title: parseString(req.body.subject_title),
+      title: parseString(req.body.title),
+      description: parseString(req.body.description),
+      deadline: parseString(req.body.deadline),
+      format: parseString(req.body.format),
+      attachment_url: parseString(req.body.attachment_url),
+      attachment_name: parseString(req.body.attachment_name),
+      order_index: parseNumber(req.body.order_index, 'order_index'),
+      updated_at: new Date().toISOString()
+    };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
+    const { data, error } = await supabase.from('homework').update(payload).eq('id', id).select().single();
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Задание обновлено', homework: data });
+  } catch (err) {
+    return sendServerError(res, 'PUT /api/homework/:id', err);
+  }
+});
+
+app.delete('/api/homework/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const { error } = await supabase.from('homework').delete().eq('id', id);
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Задание удалено' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/homework/:id', err);
   }
 });
 
@@ -482,25 +768,16 @@ app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
       return sendBadRequest(res, t(req, 'errors.student_required'));
     }
 
+    if (!answer_text && !file) {
+      return sendBadRequest(res, 'Добавьте текст ответа или файл');
+    }
+
     const fileUrl = file ? `${req.protocol}://${req.get('host')}/uploads/submissions/${file.filename}` : null;
     const fileName = file ? Buffer.from(file.originalname, 'latin1').toString('utf8') : null;
 
-    const payload = {
-      homework_id,
-      student_id,
-      answer_text,
-      file_name: fileName,
-      file_path: fileUrl,
-      status: 'submitted',
-      grade: null,
-      teacher_comment: null,
-      submitted_at: new Date().toISOString(),
-      reviewed_at: null
-    };
-
     const { data: existing, error: existingError } = await supabase
       .from('homework_submissions')
-      .select('id')
+      .select('*')
       .eq('homework_id', homework_id)
       .eq('student_id', student_id)
       .maybeSingle();
@@ -508,6 +785,27 @@ app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
     if (existingError) {
       if (file?.path) await removeTempFile(file.path);
       return sendBadRequest(res, existingError);
+    }
+
+    const now = new Date().toISOString();
+    const payload = {
+      homework_id,
+      student_id,
+      answer_text,
+      status: 'submitted',
+      grade: null,
+      teacher_comment: null,
+      submitted_at: existing?.submitted_at || now,
+      updated_at: now,
+      reviewed_at: null
+    };
+
+    if (fileName && fileUrl) {
+      payload.file_name = fileName;
+      payload.file_path = fileUrl;
+    } else if (!existing) {
+      payload.file_name = null;
+      payload.file_path = null;
     }
 
     let result, error;
@@ -526,6 +824,52 @@ app.post('/api/submit-homework', upload.single('file'), async (req, res) => {
   } catch (err) {
     if (req.file?.path) await removeTempFile(req.file.path);
     return sendServerError(res, '/api/submit-homework', err);
+  }
+});
+
+app.delete('/api/homework-submissions/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const studentId = parseString(req.query.studentId);
+
+    let query = supabase.from('homework_submissions').delete().eq('id', id);
+    if (studentId) query = query.eq('student_id', studentId);
+
+    const { error } = await query;
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Ответ удалён' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/homework-submissions/:id', err);
+  }
+});
+
+app.get('/api/teacher/homework/submissions/:homeworkId', async (req, res) => {
+  try {
+    const homeworkId = parseNumber(req.params.homeworkId, 'homeworkId', { required: true });
+    const { data: submissions, error } = await supabase
+      .from('homework_submissions')
+      .select('*')
+      .eq('homework_id', homeworkId)
+      .order('submitted_at', { ascending: false });
+    if (error) return sendBadRequest(res, error);
+
+    const studentIds = [...new Set((submissions || []).map(item => item.student_id).filter(Boolean))];
+    let students = [];
+    if (studentIds.length) {
+      const { data, error: stError } = await supabase
+        .from('profiles')
+        .select('id, full_name, group_id')
+        .in('id', studentIds);
+      if (stError) return sendBadRequest(res, stError);
+      students = data || [];
+    }
+
+    return res.json((submissions || []).map(sub => ({
+      ...sub,
+      student: students.find(student => student.id === sub.student_id) || null
+    })));
+  } catch (err) {
+    return sendServerError(res, '/api/teacher/homework/submissions/:homeworkId', err);
   }
 });
 
@@ -607,7 +951,7 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
 
     const { data, error } = await supabase
       .from('homework_submissions')
-      .update({ grade, teacher_comment, status: 'reviewed', reviewed_at: new Date().toISOString() })
+      .update({ grade, teacher_comment, status: 'reviewed', reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq('id', submissionId)
       .select()
       .single();
@@ -622,6 +966,7 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
 /* =========================================================
    SCHEDULE
 ========================================================= */
+
 
 app.get('/api/schedule/:groupId', async (req, res) => {
   try {
