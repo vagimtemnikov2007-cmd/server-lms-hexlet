@@ -575,6 +575,7 @@ app.post('/api/homework-sections', async (req, res) => {
     if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
 
     const payload = { group_id, subject_id, subject_title, title, description, order_index, created_by };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
     const { data, error } = await supabase.from('homework_sections').insert([payload]).select().single();
     if (error) return sendBadRequest(res, error);
     return res.status(201).json({ message: 'Раздел создан', section: data });
@@ -628,6 +629,7 @@ app.post('/api/homework-materials', async (req, res) => {
     if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
 
     const payload = { section_id, title, type, file_url, file_name, content, order_index, created_by };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
     const { data, error } = await supabase.from('homework_materials').insert([payload]).select().single();
     if (error) return sendBadRequest(res, error);
     return res.status(201).json({ message: 'Материал добавлен', material: data });
@@ -693,10 +695,21 @@ app.post('/api/homework-attachments/upload', upload.single('file'), async (req, 
 
 app.post('/api/homework', async (req, res) => {
   try {
-    const group_id = parseNumber(req.body.group_id, 'group_id', { required: true });
     const section_id = parseNumber(req.body.section_id, 'section_id');
-    const subject_title = parseString(req.body.subject_title);
-    const subject_id = await getOrCreateSubjectId(subject_title, req.body.subject_id);
+    if (!section_id) return sendBadRequest(res, 'Выберите раздел: section_id обязателен для нового формата ДЗ');
+
+    const { data: section, error: sectionError } = await supabase
+      .from('homework_sections')
+      .select('*')
+      .eq('id', section_id)
+      .maybeSingle();
+
+    if (sectionError) return sendBadRequest(res, sectionError);
+    if (!section) return sendBadRequest(res, 'Раздел не найден');
+
+    const group_id = Number(section.group_id);
+    const subject_title = section.subject_title || parseString(req.body.subject_title);
+    const subject_id = section.subject_id || await getOrCreateSubjectId(subject_title, req.body.subject_id);
     const title = parseString(req.body.title);
     const description = parseString(req.body.description);
     const format = parseString(req.body.format) || 'онлайн';
@@ -710,7 +723,22 @@ app.post('/api/homework', async (req, res) => {
     if (!description) return sendBadRequest(res, t(req, 'errors.description_required'));
     if (!deadline) return sendBadRequest(res, t(req, 'errors.deadline_required'));
 
-    const payload = { group_id, section_id, subject_id, subject_title, title, description, format, deadline, attachment_url, attachment_name, order_index, created_by };
+    const payload = {
+      group_id,
+      section_id,
+      subject_id,
+      subject_title,
+      title,
+      description,
+      format,
+      deadline,
+      attachment_url,
+      attachment_name,
+      order_index,
+      created_by
+    };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
     const { data, error } = await supabase.from('homework').insert([payload]).select().single();
 
     if (error) return sendBadRequest(res, error);
