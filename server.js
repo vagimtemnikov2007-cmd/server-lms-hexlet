@@ -1049,6 +1049,368 @@ app.put('/api/schedule/:id', async (req, res) => {
   }
 });
 
+
+
+/* =========================================================
+   LMS PLUS: SCHEDULE IMPORT, ATTENDANCE, QUIZZES, NOTIFICATIONS
+   These endpoints are additive. Existing demo functions keep working.
+========================================================= */
+
+function xmlDecode(value = '') {
+  return String(value)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function columnNameToIndex(name = 'A') {
+  let result = 0;
+  for (const ch of String(name).toUpperCase()) {
+    result = result * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return result - 1;
+}
+
+function readZipEntries(buffer) {
+  const zlib = require('zlib');
+  const entries = new Map();
+  let eocd = -1;
+  for (let i = buffer.length - 22; i >= 0; i--) {
+    if (buffer.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('Не найден конец ZIP. Файл не похож на XLSX.');
+  const total = buffer.readUInt16LE(eocd + 10);
+  let ptr = buffer.readUInt32LE(eocd + 16);
+
+  for (let i = 0; i < total; i++) {
+    if (buffer.readUInt32LE(ptr) !== 0x02014b50) break;
+    const method = buffer.readUInt16LE(ptr + 10);
+    const compressedSize = buffer.readUInt32LE(ptr + 20);
+    const nameLen = buffer.readUInt16LE(ptr + 28);
+    const extraLen = buffer.readUInt16LE(ptr + 30);
+    const commentLen = buffer.readUInt16LE(ptr + 32);
+    const localOffset = buffer.readUInt32LE(ptr + 42);
+    const name = buffer.slice(ptr + 46, ptr + 46 + nameLen).toString('utf8');
+
+    const localNameLen = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLen = buffer.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+    const compressed = buffer.slice(dataStart, dataStart + compressedSize);
+    let data;
+    if (method === 0) data = compressed;
+    else if (method === 8) data = zlib.inflateRawSync(compressed);
+    else data = Buffer.alloc(0);
+    entries.set(name, data.toString('utf8'));
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+function parseSharedStrings(xml = '') {
+  const result = [];
+  const siRegex = /<si[\s\S]*?<\/si>/g;
+  let match;
+  while ((match = siRegex.exec(xml))) {
+    const si = match[0];
+    const chunks = [];
+    const tRegex = /<t[^>]*>([\s\S]*?)<\/t>/g;
+    let t;
+    while ((t = tRegex.exec(si))) chunks.push(xmlDecode(t[1]));
+    result.push(chunks.join(''));
+  }
+  return result;
+}
+
+function parseSheetRows(xml = '', sharedStrings = []) {
+  const rows = [];
+  const rowRegex = /<row\s([^>]*)>([\s\S]*?)<\/row>/g;
+  let rowMatch;
+  while ((rowMatch = rowRegex.exec(xml))) {
+    const rowBody = rowMatch[2] || '';
+    const cellRegex = /<c\s([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+    let match;
+    while ((match = cellRegex.exec(rowBody))) {
+      const attrs = match[1] || '';
+      const body = match[2] || '';
+      const ref = /r="([A-Z]+)(\d+)"/.exec(attrs);
+      if (!ref) continue;
+      const col = columnNameToIndex(ref[1]);
+      const row = Number(ref[2]) - 1;
+      const type = (/t="([^"]+)"/.exec(attrs) || [])[1];
+      let value = '';
+      if (type === 'inlineStr') {
+        const chunks = [];
+        const tr = /<t[^>]*>([\s\S]*?)<\/t>/g;
+        let tm;
+        while ((tm = tr.exec(body))) chunks.push(xmlDecode(tm[1]));
+        value = chunks.join('');
+      } else {
+        const v = /<v>([\s\S]*?)<\/v>/.exec(body);
+        value = v ? xmlDecode(v[1]) : '';
+        if (type === 's') value = sharedStrings[Number(value)] || '';
+      }
+      if (value !== '') {
+        if (!rows[row]) rows[row] = [];
+        rows[row][col] = String(value).replace(/\s+/g, ' ').trim();
+      }
+    }
+  }
+  return rows;
+}
+
+function parseXlsxWorkbook(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  const entries = readZipEntries(buffer);
+  const sharedStrings = parseSharedStrings(entries.get('xl/sharedStrings.xml') || '');
+  const sheets = [...entries.keys()]
+    .filter(name => /^xl\/worksheets\/sheet\d+\.xml$/.test(name))
+    .sort((a, b) => Number((a.match(/sheet(\d+)/) || [0, 0])[1]) - Number((b.match(/sheet(\d+)/) || [0, 0])[1]))
+    .map((name, index) => ({ name: `Лист ${index + 1}`, rows: parseSheetRows(entries.get(name), sharedStrings) }));
+  if (!sheets.length) throw new Error('В XLSX не найдены листы.');
+  return sheets;
+}
+
+function cleanLessonText(raw = '') {
+  return String(raw || '')
+    .replace(/Кабинет\s*:?\s*№?\s*[\w\-А-Яа-яЁё/]+/gi, '')
+    .replace(/№\s*\d+[А-Яа-яA-Za-z]?/g, '')
+    .replace(/Преподаватель\s*:?\s*[^\n]+/gi, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.:;,\-\s]+$/g, '')
+    .trim();
+}
+
+function extractRoom(raw = '') {
+  const text = String(raw || '');
+  const match = text.match(/(?:Кабинет|аудитория|аудит\.)\s*:?\s*№?\s*([\w\-А-Яа-яЁё/]+)/i) || text.match(/№\s*(\d{2,4}[А-Яа-яA-Za-z]?)/);
+  return match ? match[1].trim() : '';
+}
+
+function extractTeacher(raw = '') {
+  const text = String(raw || '');
+  const match = text.match(/Преподаватель\s*:?\s*([^№\n]+?)(?:\s+Кабинет|$)/i);
+  return match ? match[1].trim() : '';
+}
+
+function parseScheduleWorkbook(filePath) {
+  const workbook = parseXlsxWorkbook(filePath);
+  const days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+  const lessons = [];
+  const groups = new Set();
+  const subjects = new Set();
+
+  for (const sheet of workbook) {
+    const rows = sheet.rows;
+    const dayBlocks = [];
+    for (let r = 0; r < Math.min(rows.length, 20); r++) {
+      const row = rows[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        const val = String(row[c] || '').trim();
+        const dayIndex = days.findIndex(d => val.toLowerCase().startsWith(d.toLowerCase().slice(0, 5)));
+        if (dayIndex >= 0) dayBlocks.push({ day_of_week: dayIndex + 1, day_title: days[dayIndex], day_col: c, lesson_start_col: c, group_col: Math.max(0, c - 2) });
+      }
+    }
+
+    for (const block of dayBlocks) {
+      const timeRowIndex = 6;
+      const times = [];
+      for (let i = 0; i < 8; i++) times.push((rows[timeRowIndex] || [])[block.lesson_start_col + i] || '');
+
+      for (let r = 8; r < rows.length; r++) {
+        const row = rows[r] || [];
+        const groupName = String(row[block.group_col] || '').trim();
+        if (!groupName || /курс|неделя|смена|пара/i.test(groupName)) continue;
+
+        for (let i = 0; i < 8; i++) {
+          const raw = String(row[block.lesson_start_col + i] || '').trim();
+          if (!raw || raw.length < 2) continue;
+          const subject_title = cleanLessonText(raw);
+          if (!subject_title) continue;
+          const item = {
+            sheet: sheet.name,
+            group_name: groupName,
+            day_of_week: block.day_of_week,
+            day_title: block.day_title,
+            lesson_number: i + 1,
+            time: times[i] || '',
+            subject_title,
+            teacher: extractTeacher(raw),
+            room: extractRoom(raw),
+            raw
+          };
+          lessons.push(item);
+          groups.add(groupName);
+          subjects.add(subject_title);
+        }
+      }
+    }
+  }
+
+  const byGroup = {};
+  for (const lesson of lessons) {
+    byGroup[lesson.group_name] = byGroup[lesson.group_name] || 0;
+    byGroup[lesson.group_name]++;
+  }
+  return {
+    groups: [...groups].sort(),
+    subjects: [...subjects].sort(),
+    lessons,
+    summary: {
+      sheets: workbook.length,
+      groups: groups.size,
+      subjects: subjects.size,
+      lessons: lessons.length,
+      byGroup
+    }
+  };
+}
+
+async function findGroupIdByName(groupName, groupsCache = null) {
+  const normalized = String(groupName || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const groups = groupsCache || (await supabase.from('groups').select('id, name')).data || [];
+  const direct = groups.find(g => String(g.name || '').trim().toLowerCase() === normalized);
+  if (direct) return direct.id;
+  const soft = groups.find(g => normalized.includes(String(g.name || '').trim().toLowerCase()) || String(g.name || '').trim().toLowerCase().includes(normalized));
+  return soft?.id || null;
+}
+
+app.post('/api/schedule/import-excel', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file?.path) return sendBadRequest(res, 'Прикрепите XLSX-файл расписания');
+    const parsed = parseScheduleWorkbook(req.file.path);
+    const shouldSave = parseBoolean(req.query.save || req.body.save);
+
+    if (!shouldSave) {
+      await removeTempFile(req.file.path);
+      return res.json(parsed);
+    }
+
+    const { data: allGroups } = await supabase.from('groups').select('id, name');
+    const savedGroups = [];
+    const skippedGroups = [];
+
+    for (const groupName of parsed.groups) {
+      const groupId = await findGroupIdByName(groupName, allGroups || []);
+      if (!groupId) { skippedGroups.push(groupName); continue; }
+      const groupLessons = parsed.lessons.filter(x => x.group_name === groupName);
+      const rows = [];
+      for (const lesson of groupLessons) {
+        const subjectId = await getOrCreateSubjectId(lesson.subject_title);
+        rows.push({
+          group_id: Number(groupId),
+          day_of_week: Number(lesson.day_of_week),
+          lesson_number: Number(lesson.lesson_number),
+          subject_id: subjectId,
+          room: lesson.room || ''
+        });
+      }
+      await supabase.from('schedule').delete().eq('group_id', groupId);
+      if (rows.length) {
+        const { error } = await supabase.from('schedule').insert(rows);
+        if (error) throw error;
+      }
+      savedGroups.push({ group_name: groupName, group_id: groupId, lessons: rows.length });
+    }
+
+    await removeTempFile(req.file.path);
+    return res.json({ message: 'Расписание импортировано', summary: parsed.summary, savedGroups, skippedGroups });
+  } catch (err) {
+    if (req.file?.path) await removeTempFile(req.file.path);
+    return sendServerError(res, 'POST /api/schedule/import-excel', err);
+  }
+});
+
+app.get('/api/notifications/:userId', async (req, res) => {
+  try {
+    const userId = parseNumber(req.params.userId, 'userId', { required: true });
+    const { data, error } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (error) return res.json([]);
+    return res.json(data || []);
+  } catch (err) { return sendServerError(res, '/api/notifications/:userId', err); }
+});
+
+app.post('/api/notifications', async (req, res) => {
+  try {
+    const userId = parseNumber(req.body.user_id, 'user_id', { required: true });
+    const payload = { user_id: userId, title: parseString(req.body.title) || 'Уведомление', body: parseString(req.body.body) || '', is_read: false };
+    const { data, error } = await supabase.from('notifications').insert([payload]).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json(data);
+  } catch (err) { return sendServerError(res, 'POST /api/notifications', err); }
+});
+
+app.put('/api/notifications/:id/read', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const { data, error } = await supabase.from('notifications').update({ is_read: true }).eq('id', id).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.json(data);
+  } catch (err) { return sendServerError(res, 'PUT /api/notifications/:id/read', err); }
+});
+
+app.get('/api/attendance/:groupId', async (req, res) => {
+  try {
+    const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
+    const date = parseString(req.query.date);
+    let query = supabase.from('attendance').select('*, profiles(id, name), subjects(id, title)').eq('group_id', groupId).order('date', { ascending: false });
+    if (date) query = query.eq('date', date);
+    const { data, error } = await query.limit(200);
+    if (error) return res.json([]);
+    return res.json(data || []);
+  } catch (err) { return sendServerError(res, '/api/attendance/:groupId', err); }
+});
+
+app.post('/api/attendance', async (req, res) => {
+  try {
+    const payload = {
+      group_id: parseNumber(req.body.group_id, 'group_id', { required: true }),
+      student_id: parseNumber(req.body.student_id, 'student_id', { required: true }),
+      subject_id: parseNumber(req.body.subject_id, 'subject_id'),
+      date: parseString(req.body.date) || new Date().toISOString().slice(0, 10),
+      lesson_number: parseNumber(req.body.lesson_number, 'lesson_number') || 1,
+      status: parseString(req.body.status) || 'present',
+      comment: parseString(req.body.comment) || ''
+    };
+    const { data, error } = await supabase.from('attendance').insert([payload]).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json(data);
+  } catch (err) { return sendServerError(res, 'POST /api/attendance', err); }
+});
+
+app.get('/api/quizzes', async (req, res) => {
+  try {
+    let query = supabase.from('quizzes').select('*').order('created_at', { ascending: false });
+    if (req.query.group_id) query = query.eq('group_id', Number(req.query.group_id));
+    const { data, error } = await query.limit(100);
+    if (error) return res.json([]);
+    return res.json(data || []);
+  } catch (err) { return sendServerError(res, '/api/quizzes', err); }
+});
+
+app.post('/api/quizzes', async (req, res) => {
+  try {
+    const payload = {
+      title: parseString(req.body.title) || 'Новый тест',
+      description: parseString(req.body.description) || '',
+      group_id: parseNumber(req.body.group_id, 'group_id'),
+      subject_id: parseNumber(req.body.subject_id, 'subject_id'),
+      created_by: parseNumber(req.body.created_by, 'created_by'),
+      deadline: parseString(req.body.deadline)
+    };
+    const { data, error } = await supabase.from('quizzes').insert([payload]).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json(data);
+  } catch (err) { return sendServerError(res, 'POST /api/quizzes', err); }
+});
+
 /* =========================================================
    ADMIN / USERS / TEACHER
 ========================================================= */
