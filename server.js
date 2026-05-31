@@ -400,7 +400,8 @@ function normalizeSection(section) {
   return {
     ...section,
     materials: [],
-    homework: []
+    homework: [],
+    subsections: []
   };
 }
 
@@ -411,7 +412,14 @@ function buildHomeworkModules({ sections = [], materials = [], homework = [], su
   (sections || []).forEach(section => {
     const normalized = normalizeSection(section);
     sectionMap.set(Number(section.id), normalized);
-    result.push(normalized);
+  });
+
+  (sections || []).forEach(section => {
+    const normalized = sectionMap.get(Number(section.id));
+    const parentId = Number(section.parent_id);
+    const parent = Number.isFinite(parentId) ? sectionMap.get(parentId) : null;
+    if (parent && parent.id !== normalized.id) parent.subsections.push(normalized);
+    else result.push(normalized);
   });
 
   const legacyHomework = [];
@@ -574,7 +582,8 @@ app.post('/api/homework-sections', async (req, res) => {
 
     if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
 
-    const payload = { group_id, subject_id, subject_title, title, description, order_index, created_by };
+    const parent_id = parseNumber(req.body.parent_id, 'parent_id');
+    const payload = { group_id, subject_id, subject_title, title, description, parent_id, order_index, created_by };
     Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
     const { data, error } = await supabase.from('homework_sections').insert([payload]).select().single();
     if (error) return sendBadRequest(res, error);
@@ -591,6 +600,7 @@ app.put('/api/homework-sections/:id', async (req, res) => {
       title: parseString(req.body.title),
       description: parseString(req.body.description),
       subject_title: parseString(req.body.subject_title),
+      parent_id: parseNumber(req.body.parent_id, 'parent_id'),
       order_index: parseNumber(req.body.order_index, 'order_index') ?? 0,
       updated_at: new Date().toISOString()
     };
