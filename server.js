@@ -252,7 +252,7 @@ app.post('/api/login', async (req, res) => {
 
     const { data: user, error } = await supabase
       .from('profiles')
-      .select('id, role, full_name, group_id, course, specialization, iin, password, can_edit_news, avatar_url')
+      .select('id, role, full_name, group_id, course, specialization, iin, password, can_edit_news, can_edit_schedule, avatar_url')
       .eq('iin', iin)
       .maybeSingle();
 
@@ -308,6 +308,15 @@ app.get('/api/subjects', async (req, res) => {
    JOURNAL / GRADES
 ========================================================= */
 
+function parseGradeInput(value) {
+  const raw = String(value ?? '').trim().toUpperCase();
+  if (['Н', 'У', 'О'].includes(raw)) return raw;
+  const number = Number(raw);
+  if (!Number.isNaN(number) && number >= 0 && number <= 100) return String(number);
+  return null;
+}
+
+
 app.get('/api/journal/:groupId', async (req, res) => {
   try {
     const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
@@ -333,13 +342,13 @@ app.post('/api/journal', async (req, res) => {
   try {
     const group_id = parseNumber(req.body.group_id, 'group_id', { required: true });
     const student_id = parseString(req.body.student_id);
-    const grade = parseNumber(req.body.grade, 'grade', { required: true, allowNull: false });
+    const grade = parseGradeInput(req.body.grade);
     const comment = parseString(req.body.comment);
     const created_at = parseString(req.body.created_at) || new Date().toISOString();
     const subject_id = await getOrCreateSubjectId(req.body.subject_title, req.body.subject_id);
 
     if (!student_id) return sendBadRequest(res, t(req, 'errors.student_required'));
-    if (grade < 0 || grade > 100) return sendBadRequest(res, 'grade должен быть от 0 до 100');
+    if (grade === null) return sendBadRequest(res, 'grade должен быть 0-100, Н, У или О');
 
     const payload = { group_id, student_id, subject_id, grade, comment, created_at };
 
@@ -360,7 +369,11 @@ app.put('/api/journal/:id', async (req, res) => {
   try {
     const id = parseNumber(req.params.id, 'id', { required: true });
     const payload = {};
-    if (req.body.grade !== undefined) payload.grade = parseNumber(req.body.grade, 'grade', { required: true });
+    if (req.body.grade !== undefined) {
+      const nextGrade = parseGradeInput(req.body.grade);
+      if (nextGrade === null) return sendBadRequest(res, 'grade должен быть 0-100, Н, У или О');
+      payload.grade = nextGrade;
+    }
     if (req.body.comment !== undefined) payload.comment = parseString(req.body.comment);
     if (req.body.created_at !== undefined) payload.created_at = parseString(req.body.created_at);
 
@@ -1427,11 +1440,77 @@ app.post('/api/quizzes', async (req, res) => {
 
 app.get('/api/admin/users', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('profiles').select('id, full_name, role, group_id, can_edit_news').order('full_name', { ascending: true });
+    const { data, error } = await supabase.from('profiles').select('id, full_name, email, role, group_id, course, can_edit_news, can_edit_schedule').order('full_name', { ascending: true });
     if (error) return sendBadRequest(res, error);
     return res.json(data || []);
   } catch (err) {
     return sendServerError(res, '/api/admin/users', err);
+  }
+});
+
+
+app.put('/api/admin/users/access/bulk', async (req, res) => {
+  try {
+    const userIds = Array.isArray(req.body.user_ids) ? req.body.user_ids.map(parseString).filter(Boolean) : [];
+    if (!userIds.length) return sendBadRequest(res, 'Выберите пользователей');
+
+    const payload = {};
+    const role = parseString(req.body.role);
+    if (role) {
+      if (!['student', 'teacher', 'admin'].includes(role)) return sendBadRequest(res, 'Некорректная роль');
+      payload.role = role;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'group_id')) {
+      payload.group_id = req.body.group_id === null || req.body.group_id === ''
+        ? null
+        : parseNumber(req.body.group_id, 'group_id', { required: false, allowNull: true });
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'can_edit_news')) {
+      payload.can_edit_news = parseBoolean(req.body.can_edit_news);
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'can_edit_schedule')) {
+      payload.can_edit_schedule = parseBoolean(req.body.can_edit_schedule);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'course_delta')) {
+      const delta = Number(req.body.course_delta);
+      if (!Number.isFinite(delta)) return sendBadRequest(res, 'course_delta должен быть числом');
+      for (const userId of userIds) {
+        const { data: current, error: readError } = await supabase
+          .from('profiles')
+          .select('course')
+          .eq('id', userId)
+          .maybeSingle();
+        if (readError) return sendBadRequest(res, readError);
+        const currentCourse = Number(current?.course || 0);
+        const nextCourse = Math.max(0, currentCourse + delta);
+        const { error: updateCourseError } = await supabase
+          .from('profiles')
+          .update({ course: nextCourse })
+          .eq('id', userId);
+        if (updateCourseError) return sendBadRequest(res, updateCourseError);
+      }
+    }
+
+    if (Object.keys(payload).length) {
+      const { error } = await supabase
+        .from('profiles')
+        .update(payload)
+        .in('id', userIds);
+      if (error) return sendBadRequest(res, error);
+    }
+
+    const { data, error: selectError } = await supabase
+      .from('profiles')
+      .select('id, full_name, role, group_id, course, can_edit_news, can_edit_schedule')
+      .in('id', userIds);
+    if (selectError) return sendBadRequest(res, selectError);
+
+    return res.json({ message: 'Права пользователей обновлены', users: data || [] });
+  } catch (err) {
+    return sendServerError(res, '/api/admin/users/access/bulk', err);
   }
 });
 
@@ -1440,6 +1519,7 @@ app.put('/api/admin/users/:userId/access', async (req, res) => {
     const userId = parseString(req.params.userId);
     const role = parseString(req.body.role);
     const can_edit_news = parseBoolean(req.body.can_edit_news);
+    const can_edit_schedule = parseBoolean(req.body.can_edit_schedule);
     if (!userId) return sendBadRequest(res, 'userId обязателен');
     if (!role || !['student', 'teacher', 'admin'].includes(role)) return sendBadRequest(res, 'Некорректная роль');
 
@@ -1449,9 +1529,9 @@ app.put('/api/admin/users/:userId/access', async (req, res) => {
 
     const { data, error } = await supabase
       .from('profiles')
-      .update({ role, group_id, can_edit_news })
+      .update({ role, group_id, can_edit_news, can_edit_schedule })
       .eq('id', userId)
-      .select('id, full_name, role, group_id, can_edit_news')
+      .select('id, full_name, role, group_id, can_edit_news, can_edit_schedule')
       .single();
 
     if (error) return sendBadRequest(res, error);
