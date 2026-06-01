@@ -1431,15 +1431,55 @@ app.post('/api/schedule/import-excel', upload.single('file'), async (req, res) =
 
 app.get('/api/notifications/:userId', async (req, res) => {
   try {
-    const userId = parseNumber(req.params.userId, 'userId', { required: true });
-    const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(50);
-    if (error) return res.json([]);
-    return res.json(data || []);
+    const userIdRaw = parseString(req.params.userId);
+    if (!userIdRaw) return sendBadRequest(res, 'userId обязателен');
+
+    const limit = Math.min(parseNumber(req.query.limit, 'limit') || 50, 100);
+    const groupId = req.query.groupId !== undefined && req.query.groupId !== null && req.query.groupId !== ''
+      ? parseNumber(req.query.groupId, 'groupId')
+      : null;
+
+    const userVariants = new Set([String(userIdRaw)]);
+    const numericUserId = Number(userIdRaw);
+    if (!Number.isNaN(numericUserId)) userVariants.add(String(numericUserId));
+
+    const requests = [
+      supabase
+        .from('notifications')
+        .select('*')
+        .in('user_id', [...userVariants])
+        .order('created_at', { ascending: false })
+        .limit(limit)
+    ];
+
+    if (groupId) {
+      requests.push(
+        supabase
+          .from('notifications')
+          .select('*')
+          .is('user_id', null)
+          .eq('group_id', groupId)
+          .order('created_at', { ascending: false })
+          .limit(limit)
+      );
+    }
+
+    const results = await Promise.all(requests);
+    const notifications = [];
+    for (const result of results) {
+      if (result.error) {
+        console.warn('Не удалось получить уведомления:', result.error.message);
+        continue;
+      }
+      notifications.push(...(result.data || []));
+    }
+
+    const unique = new Map();
+    for (const item of notifications) unique.set(String(item.id), item);
+
+    return res.json([...unique.values()]
+      .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+      .slice(0, limit));
   } catch (err) { return sendServerError(res, '/api/notifications/:userId', err); }
 });
 
