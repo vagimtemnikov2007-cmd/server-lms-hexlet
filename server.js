@@ -1440,9 +1440,49 @@ app.post('/api/quizzes', async (req, res) => {
 
 app.get('/api/admin/users', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('profiles').select('id, full_name, email, role, group_id, course, can_edit_news, can_edit_schedule').order('full_name', { ascending: true });
-    if (error) return sendBadRequest(res, error);
-    return res.json(data || []);
+    // В разных версиях тестовой базы profiles может не иметь email/course/can_edit_schedule.
+    // Поэтому список пользователей грузим через несколько безопасных вариантов select,
+    // а недостающие поля нормализуем ниже, чтобы админка не оставалась пустой.
+    const selectVariants = [
+      'id, full_name, role, group_id, course, can_edit_news, can_edit_schedule',
+      'id, full_name, role, group_id, course, can_edit_news',
+      'id, full_name, role, group_id, course',
+      'id, full_name, role, group_id',
+      'id, role, group_id'
+    ];
+
+    let data = null;
+    let lastError = null;
+
+    for (const columns of selectVariants) {
+      const result = await supabase
+        .from('profiles')
+        .select(columns)
+        .order('full_name', { ascending: true, nullsFirst: false });
+
+      if (!result.error) {
+        data = result.data || [];
+        lastError = null;
+        break;
+      }
+
+      lastError = result.error;
+    }
+
+    if (lastError && !data) return sendBadRequest(res, lastError);
+
+    const normalized = (data || []).map(user => ({
+      id: user.id,
+      full_name: user.full_name || user.name || `Пользователь ${user.id}`,
+      email: user.email || '',
+      role: user.role || 'student',
+      group_id: user.group_id ?? null,
+      course: user.course ?? null,
+      can_edit_news: Boolean(user.can_edit_news),
+      can_edit_schedule: Boolean(user.can_edit_schedule)
+    }));
+
+    return res.json(normalized);
   } catch (err) {
     return sendServerError(res, '/api/admin/users', err);
   }
