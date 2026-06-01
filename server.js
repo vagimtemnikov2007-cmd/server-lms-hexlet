@@ -49,64 +49,11 @@ const I18N = {
       empty_comment: 'Комментарий не может быть пустым',
       bad_reaction: 'Некорректная реакция'
     }
-  },
-  kz: {
-    homework_created: 'Үй тапсырмасы жасалды',
-    homework_saved: 'Тапсырма сақталды',
-    homework_reviewed: 'Үй тапсырмасы тексерілді',
-    news_published: 'Жаңалық жарияланды',
-    news_updated: 'Жаңалық жаңартылды',
-    news_deleted: 'Жаңалық жойылды',
-    comment_added: 'Пікір қосылды',
-    comment_deleted: 'Пікір жойылды',
-    schedule_saved: 'Кесте сақталды',
-    grade_saved: 'Баға сақталды',
-    server_ok: 'Электронды журнал API жұмыс істеп тұр 🚀',
-    errors: {
-      required_login: 'ИИН мен құпиясөзді енгізіңіз',
-      bad_login: 'ИИН немесе құпиясөз қате',
-      forbidden: 'Қолжетімділік жоқ',
-      group_required: 'group_id міндетті',
-      title_required: 'title міндетті',
-      description_required: 'description міндетті',
-      deadline_required: 'deadline міндетті',
-      student_required: 'student_id міндетті',
-      teacher_required: 'teacherId міндетті',
-      empty_comment: 'Пікір бос болмауы керек',
-      bad_reaction: 'Реакция қате'
-    }
-  },
-  en: {
-    homework_created: 'Homework created',
-    homework_saved: 'Submission saved',
-    homework_reviewed: 'Homework reviewed',
-    news_published: 'News published',
-    news_updated: 'News updated',
-    news_deleted: 'News deleted',
-    comment_added: 'Comment added',
-    comment_deleted: 'Comment deleted',
-    schedule_saved: 'Schedule saved',
-    grade_saved: 'Grade saved',
-    server_ok: 'Electronic journal API is running 🚀',
-    errors: {
-      required_login: 'Enter IIN and password',
-      bad_login: 'Invalid IIN or password',
-      forbidden: 'Access denied',
-      group_required: 'group_id is required',
-      title_required: 'title is required',
-      description_required: 'description is required',
-      deadline_required: 'deadline is required',
-      student_required: 'student_id is required',
-      teacher_required: 'teacherId is required',
-      empty_comment: 'Comment cannot be empty',
-      bad_reaction: 'Invalid reaction'
-    }
   }
 };
 
 function getLang(req) {
-  const raw = (req.headers['x-language'] || req.query.lang || req.headers['accept-language'] || 'ru').toString().slice(0, 2).toLowerCase();
-  return ['ru', 'kz', 'en'].includes(raw) ? raw : 'ru';
+  return 'ru';
 }
 
 function t(req, key, fallback = key) {
@@ -116,11 +63,6 @@ function t(req, key, fallback = key) {
   for (const part of parts) value = value?.[part];
   return value || fallback;
 }
-
-app.get('/api/i18n/:lang', (req, res) => {
-  const lang = ['ru', 'kz', 'en'].includes(req.params.lang) ? req.params.lang : 'ru';
-  res.json(I18N[lang]);
-});
 
 /* =========================================================
    HELPERS
@@ -216,6 +158,48 @@ function normalizeScheduleRows(rows, groupId) {
     subject_id: row.subject_id ? Number(row.subject_id) : null,
     room: parseString(row.room) || ''
   })).filter(row => row.group_id && row.day_of_week && row.lesson_number);
+}
+
+async function createNotification({ user_id = null, group_id = null, type = 'system', title = 'Уведомление', body = '', link = '', payload = {} }) {
+  try {
+    const row = {
+      user_id: user_id === undefined || user_id === null ? null : String(user_id),
+      group_id: group_id === undefined || group_id === null || group_id === '' ? null : Number(group_id),
+      type: parseString(type) || 'system',
+      title: parseString(title) || 'Уведомление',
+      body: parseString(body) || '',
+      link: parseString(link) || '',
+      payload: payload || {},
+      is_read: false
+    };
+    if (!row.group_id) delete row.group_id;
+    const { error } = await supabase.from('notifications').insert([row]);
+    if (error) console.warn('Уведомление не сохранено:', error.message);
+  } catch (err) {
+    console.warn('Уведомление пропущено:', err.message);
+  }
+}
+
+async function createGroupNotification(groupId, notification) {
+  try {
+    const { data: students, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('group_id', Number(groupId))
+      .eq('role', 'student');
+    if (error) {
+      await createNotification({ ...notification, group_id: groupId });
+      return;
+    }
+    const ids = (students || []).map(student => student.id).filter(Boolean);
+    if (!ids.length) {
+      await createNotification({ ...notification, group_id: groupId });
+      return;
+    }
+    await Promise.all(ids.map(id => createNotification({ ...notification, user_id: id, group_id: groupId })));
+  } catch (err) {
+    console.warn('Групповое уведомление пропущено:', err.message);
+  }
 }
 
 /* =========================================================
@@ -359,6 +343,15 @@ app.post('/api/journal', async (req, res) => {
       .single();
 
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      user_id: student_id,
+      group_id,
+      type: 'grade',
+      title: `Выставлена оценка: ${data.grade}`,
+      body: `${data.subjects?.title || subject_id || 'Предмет'} · ${comment || 'Комментарий не указан'}`,
+      link: '#ysp',
+      payload: { grade_id: data.id, grade: data.grade, subject_id }
+    });
     return res.status(201).json({ message: t(req, 'grade_saved'), grade: data });
   } catch (err) {
     return sendServerError(res, 'POST /api/journal', err);
@@ -388,6 +381,15 @@ app.put('/api/journal/:id', async (req, res) => {
       .single();
 
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      user_id: data.student_id,
+      group_id: data.group_id,
+      type: 'grade',
+      title: `Оценка обновлена: ${data.grade}`,
+      body: `${data.subjects?.title || 'Предмет'} · ${data.comment || 'Комментарий не указан'}`,
+      link: '#ysp',
+      payload: { grade_id: data.id, grade: data.grade, subject_id: data.subject_id }
+    });
     return res.json({ message: t(req, 'grade_saved'), grade: data });
   } catch (err) {
     return sendServerError(res, 'PUT /api/journal/:id', err);
@@ -419,7 +421,7 @@ function normalizeSection(section) {
   };
 }
 
-function buildHomeworkModules({ sections = [], materials = [], homework = [], submissions = [], tests = [], testAttempts = [] }) {
+function buildHomeworkModules({ sections = [], materials = [], homework = [], submissions = [], tests = [], testQuestions = [], testAttempts = [] }) {
   const sectionMap = new Map();
   const result = [];
 
@@ -453,14 +455,17 @@ function buildHomeworkModules({ sections = [], materials = [], homework = [], su
   });
 
   (tests || []).forEach(test => {
+    const questions = (testQuestions || [])
+      .filter(question => Number(question.test_id) === Number(test.id))
+      .sort((a, b) => (a.order_index || 0) - (b.order_index || 0) || Number(a.id) - Number(b.id));
     const attempts = (testAttempts || [])
-      .filter(item => Number(item.test_id) === Number(test.id))
+      .filter(row => Number(row.test_id) === Number(test.id))
       .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
     const attempt = attempts[0] || null;
     const attemptsCount = attempts.length;
     const attemptsLimit = Number(test.attempts_limit || 1);
     const canAttempt = attemptsLimit <= 0 || attemptsCount < attemptsLimit;
-    const normalizedTest = { ...test, attempt, attempts_count: attemptsCount, can_attempt: canAttempt };
+    const normalizedTest = { ...test, questions, attempt, attempts_count: attemptsCount, can_attempt: canAttempt };
     const section = test.section_id ? sectionMap.get(Number(test.section_id)) : null;
     if (section) section.tests.push(normalizedTest);
   });
@@ -522,6 +527,9 @@ app.get('/api/homework-modules/:groupId', async (req, res) => {
     const homeworkIds = homeworkData.map(hw => hw.id);
 
     let materials = [];
+    let tests = [];
+    let testQuestions = [];
+    let testAttempts = [];
     if (sectionIds.length) {
       const { data, error } = await supabase
         .from('homework_materials')
@@ -531,28 +539,38 @@ app.get('/api/homework-modules/:groupId', async (req, res) => {
         .order('id', { ascending: true });
       if (error) return sendBadRequest(res, error);
       materials = data || [];
-    }
 
-    let tests = [];
-    let testAttempts = [];
-    if (sectionIds.length) {
-      const { data: testsData, error: testsError } = await supabase
+      const { data: testData, error: testError } = await supabase
         .from('lms_tests')
-        .select('*, questions:lms_test_questions(*)')
+        .select('*')
         .in('section_id', sectionIds)
         .order('order_index', { ascending: true })
         .order('id', { ascending: true });
-      if (!testsError) tests = testsData || [];
-    }
+      if (testError) return sendBadRequest(res, testError);
+      tests = testData || [];
 
-    if (studentId && tests.length) {
-      const { data: attemptsData, error: attemptsError } = await supabase
-        .from('lms_test_attempts')
-        .select('*')
-        .eq('student_id', studentId)
-        .in('test_id', tests.map(test => test.id))
-        .order('created_at', { ascending: false });
-      if (!attemptsError) testAttempts = attemptsData || [];
+      const testIds = tests.map(test => test.id);
+      if (testIds.length) {
+        const { data: questionData, error: questionError } = await supabase
+          .from('lms_test_questions')
+          .select('*')
+          .in('test_id', testIds)
+          .order('order_index', { ascending: true })
+          .order('id', { ascending: true });
+        if (questionError) return sendBadRequest(res, questionError);
+        testQuestions = questionData || [];
+
+        if (studentId) {
+          const { data: attemptData, error: attemptError } = await supabase
+            .from('lms_test_attempts')
+            .select('*')
+            .eq('student_id', studentId)
+            .in('test_id', testIds)
+            .order('created_at', { ascending: false });
+          if (attemptError) return sendBadRequest(res, attemptError);
+          testAttempts = attemptData || [];
+        }
+      }
     }
 
     let submissions = [];
@@ -566,176 +584,9 @@ app.get('/api/homework-modules/:groupId', async (req, res) => {
       submissions = data || [];
     }
 
-    return res.json({ sections: buildHomeworkModules({ sections, materials, homework: homeworkData, submissions, tests, testAttempts }) });
+    return res.json({ sections: buildHomeworkModules({ sections, materials, homework: homeworkData, submissions, tests, testQuestions, testAttempts }) });
   } catch (err) {
     return sendServerError(res, '/api/homework-modules/:groupId', err);
-  }
-});
-
-
-app.post('/api/lms-tests', async (req, res) => {
-  try {
-    const section_id = parseNumber(req.body.section_id, 'section_id', { required: true });
-    const title = parseString(req.body.title) || 'Новый тест';
-    const description = parseString(req.body.description) || '';
-    const time_limit_minutes = parseNumber(req.body.time_limit_minutes, 'time_limit_minutes') ?? 20;
-    const attempts_limit = parseNumber(req.body.attempts_limit, 'attempts_limit') ?? 1;
-    const order_index = parseNumber(req.body.order_index, 'order_index') ?? 0;
-    const created_by = parseString(req.body.created_by);
-    const is_published = req.body.is_published === true || req.body.is_published === 'true';
-
-    const { data: section, error: sectionError } = await supabase
-      .from('homework_sections')
-      .select('*')
-      .eq('id', section_id)
-      .maybeSingle();
-    if (sectionError) return sendBadRequest(res, sectionError);
-    if (!section) return sendBadRequest(res, 'Раздел не найден');
-
-    const payload = {
-      section_id,
-      group_id: section.group_id,
-      subject_title: section.subject_title,
-      title,
-      description,
-      time_limit_minutes,
-      attempts_limit,
-      order_index,
-      created_by,
-      is_published
-    };
-    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
-    const { data, error } = await supabase.from('lms_tests').insert([payload]).select().single();
-    if (error) return sendBadRequest(res, error);
-    return res.status(201).json({ message: 'Тест создан', test: data });
-  } catch (err) {
-    return sendServerError(res, 'POST /api/lms-tests', err);
-  }
-});
-
-app.put('/api/lms-tests/:id', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-    const payload = {
-      title: parseString(req.body.title),
-      description: parseString(req.body.description),
-      time_limit_minutes: parseNumber(req.body.time_limit_minutes, 'time_limit_minutes'),
-      attempts_limit: parseNumber(req.body.attempts_limit, 'attempts_limit'),
-      is_published: req.body.is_published === undefined ? undefined : (req.body.is_published === true || req.body.is_published === 'true'),
-      updated_at: new Date().toISOString()
-    };
-    Object.keys(payload).forEach(key => (payload[key] === null || payload[key] === undefined) && delete payload[key]);
-    const { data, error } = await supabase.from('lms_tests').update(payload).eq('id', id).select().single();
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Тест обновлён', test: data });
-  } catch (err) {
-    return sendServerError(res, 'PUT /api/lms-tests/:id', err);
-  }
-});
-
-app.delete('/api/lms-tests/:id', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-    const { error } = await supabase.from('lms_tests').delete().eq('id', id);
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Тест удалён' });
-  } catch (err) {
-    return sendServerError(res, 'DELETE /api/lms-tests/:id', err);
-  }
-});
-
-app.post('/api/lms-tests/:id/questions', async (req, res) => {
-  try {
-    const test_id = parseNumber(req.params.id, 'id', { required: true });
-    const text = parseString(req.body.text) || 'Новый вопрос';
-    const type = parseString(req.body.type) || 'single';
-    const options = Array.isArray(req.body.options) ? req.body.options.map(String) : ['Вариант 1', 'Вариант 2'];
-    const correct_answers = Array.isArray(req.body.correct_answers) ? req.body.correct_answers.map(Number) : [0];
-    const points = parseNumber(req.body.points, 'points') ?? 1;
-    const order_index = parseNumber(req.body.order_index, 'order_index') ?? 0;
-    const { data, error } = await supabase.from('lms_test_questions').insert([{ test_id, text, type, options, correct_answers, points, order_index }]).select().single();
-    if (error) return sendBadRequest(res, error);
-    return res.status(201).json({ message: 'Вопрос добавлен', question: data });
-  } catch (err) {
-    return sendServerError(res, 'POST /api/lms-tests/:id/questions', err);
-  }
-});
-
-app.put('/api/lms-test-questions/:id', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-    const payload = {
-      text: parseString(req.body.text),
-      type: parseString(req.body.type),
-      options: Array.isArray(req.body.options) ? req.body.options.map(String) : undefined,
-      correct_answers: Array.isArray(req.body.correct_answers) ? req.body.correct_answers.map(Number) : undefined,
-      points: parseNumber(req.body.points, 'points'),
-      order_index: parseNumber(req.body.order_index, 'order_index')
-    };
-    Object.keys(payload).forEach(key => (payload[key] === null || payload[key] === undefined) && delete payload[key]);
-    const { data, error } = await supabase.from('lms_test_questions').update(payload).eq('id', id).select().single();
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Вопрос обновлён', question: data });
-  } catch (err) {
-    return sendServerError(res, 'PUT /api/lms-test-questions/:id', err);
-  }
-});
-
-app.delete('/api/lms-test-questions/:id', async (req, res) => {
-  try {
-    const id = parseNumber(req.params.id, 'id', { required: true });
-    const { error } = await supabase.from('lms_test_questions').delete().eq('id', id);
-    if (error) return sendBadRequest(res, error);
-    return res.json({ message: 'Вопрос удалён' });
-  } catch (err) {
-    return sendServerError(res, 'DELETE /api/lms-test-questions/:id', err);
-  }
-});
-
-app.post('/api/student/tests/:id/submit', async (req, res) => {
-  try {
-    const test_id = parseNumber(req.params.id, 'id', { required: true });
-    const student_id = parseString(req.body.student_id);
-    if (!student_id) return sendBadRequest(res, 'student_id обязателен');
-    const answers = req.body.answers && typeof req.body.answers === 'object' ? req.body.answers : {};
-    const duration_seconds = parseNumber(req.body.duration_seconds, 'duration_seconds') ?? 0;
-
-    const { data: test, error: testError } = await supabase
-      .from('lms_tests')
-      .select('*, questions:lms_test_questions(*)')
-      .eq('id', test_id)
-      .maybeSingle();
-    if (testError) return sendBadRequest(res, testError);
-    if (!test) return sendBadRequest(res, 'Тест не найден');
-
-    const questions = test.questions || [];
-    let total = 0;
-    let score = 0;
-    questions.forEach(question => {
-      const points = Number(question.points || 1);
-      total += points;
-      const correct = (question.correct_answers || []).map(Number).sort((a, b) => a - b);
-      const givenRaw = answers[String(question.id)] ?? answers[question.id] ?? [];
-      const given = (Array.isArray(givenRaw) ? givenRaw : [givenRaw]).map(Number).sort((a, b) => a - b);
-      if (JSON.stringify(correct) === JSON.stringify(given)) score += points;
-    });
-    const percent = total > 0 ? Math.round((score / total) * 100) : 0;
-
-    const { data: previous } = await supabase
-      .from('lms_test_attempts')
-      .select('*')
-      .eq('test_id', test_id)
-      .eq('student_id', student_id);
-    const attemptsCount = (previous || []).length;
-    const limit = Number(test.attempts_limit || 1);
-    if (limit > 0 && attemptsCount >= limit) return sendBadRequest(res, 'Попытки закончились');
-
-    const payload = { test_id, student_id, answers, score, total_score: total, percent, duration_seconds, status: 'completed' };
-    const { data, error } = await supabase.from('lms_test_attempts').insert([payload]).select().single();
-    if (error) return sendBadRequest(res, error);
-    return res.status(201).json({ message: 'Тест отправлен', attempt: data });
-  } catch (err) {
-    return sendServerError(res, 'POST /api/student/tests/:id/submit', err);
   }
 });
 
@@ -899,6 +750,167 @@ app.delete('/api/homework-materials/:id', async (req, res) => {
   }
 });
 
+app.post('/api/lms-tests', async (req, res) => {
+  try {
+    const section_id = parseNumber(req.body.section_id, 'section_id', { required: true });
+    const title = parseString(req.body.title);
+    if (!title) return sendBadRequest(res, t(req, 'errors.title_required'));
+
+    const payload = {
+      section_id,
+      title,
+      description: parseString(req.body.description) || '',
+      time_limit_minutes: parseNumber(req.body.time_limit_minutes, 'time_limit_minutes') || 20,
+      attempts_limit: parseNumber(req.body.attempts_limit, 'attempts_limit') || 1,
+      order_index: parseNumber(req.body.order_index, 'order_index') ?? 0,
+      created_by: parseString(req.body.created_by),
+      is_published: parseBoolean(req.body.is_published)
+    };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
+    const { data, error } = await supabase.from('lms_tests').insert([payload]).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ message: 'Тест создан', test: data });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/lms-tests', err);
+  }
+});
+
+app.put('/api/lms-tests/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const payload = {
+      title: parseString(req.body.title),
+      description: parseString(req.body.description),
+      time_limit_minutes: parseNumber(req.body.time_limit_minutes, 'time_limit_minutes'),
+      attempts_limit: parseNumber(req.body.attempts_limit, 'attempts_limit'),
+      order_index: parseNumber(req.body.order_index, 'order_index'),
+      updated_at: new Date().toISOString()
+    };
+    if (req.body.is_published !== undefined) payload.is_published = parseBoolean(req.body.is_published);
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
+    const { data, error } = await supabase.from('lms_tests').update(payload).eq('id', id).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Тест обновлен', test: data });
+  } catch (err) {
+    return sendServerError(res, 'PUT /api/lms-tests/:id', err);
+  }
+});
+
+app.delete('/api/lms-tests/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const { error } = await supabase.from('lms_tests').delete().eq('id', id);
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Тест удален' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/lms-tests/:id', err);
+  }
+});
+
+app.post('/api/lms-tests/:testId/questions', async (req, res) => {
+  try {
+    const test_id = parseNumber(req.params.testId, 'testId', { required: true });
+    const text = parseString(req.body.text);
+    if (!text) return sendBadRequest(res, 'Текст вопроса обязателен');
+
+    const payload = {
+      test_id,
+      text,
+      type: parseString(req.body.type) === 'multiple' ? 'multiple' : 'single',
+      options: Array.isArray(req.body.options) ? req.body.options.map(String) : [],
+      correct_answers: Array.isArray(req.body.correct_answers) ? req.body.correct_answers.map(Number).filter(Number.isFinite) : [],
+      points: parseNumber(req.body.points, 'points') || 1,
+      order_index: parseNumber(req.body.order_index, 'order_index') ?? 0
+    };
+
+    const { data, error } = await supabase.from('lms_test_questions').insert([payload]).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ message: 'Вопрос создан', question: data });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/lms-tests/:testId/questions', err);
+  }
+});
+
+app.put('/api/lms-test-questions/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const payload = {
+      text: parseString(req.body.text),
+      type: parseString(req.body.type) === 'multiple' ? 'multiple' : 'single',
+      options: Array.isArray(req.body.options) ? req.body.options.map(String) : [],
+      correct_answers: Array.isArray(req.body.correct_answers) ? req.body.correct_answers.map(Number).filter(Number.isFinite) : [],
+      points: parseNumber(req.body.points, 'points') || 1,
+      order_index: parseNumber(req.body.order_index, 'order_index'),
+      updated_at: new Date().toISOString()
+    };
+    Object.keys(payload).forEach(key => payload[key] === null && delete payload[key]);
+
+    const { data, error } = await supabase.from('lms_test_questions').update(payload).eq('id', id).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Вопрос обновлен', question: data });
+  } catch (err) {
+    return sendServerError(res, 'PUT /api/lms-test-questions/:id', err);
+  }
+});
+
+app.delete('/api/lms-test-questions/:id', async (req, res) => {
+  try {
+    const id = parseNumber(req.params.id, 'id', { required: true });
+    const { error } = await supabase.from('lms_test_questions').delete().eq('id', id);
+    if (error) return sendBadRequest(res, error);
+    return res.json({ message: 'Вопрос удален' });
+  } catch (err) {
+    return sendServerError(res, 'DELETE /api/lms-test-questions/:id', err);
+  }
+});
+
+app.post('/api/student/tests/:testId/submit', async (req, res) => {
+  try {
+    const testId = parseNumber(req.params.testId, 'testId', { required: true });
+    const student_id = parseString(req.body.student_id);
+    if (!student_id) return sendBadRequest(res, t(req, 'errors.student_required'));
+
+    const [{ data: test, error: testError }, { data: questions, error: questionsError }, { count, error: countError }] = await Promise.all([
+      supabase.from('lms_tests').select('*').eq('id', testId).maybeSingle(),
+      supabase.from('lms_test_questions').select('*').eq('test_id', testId).order('order_index', { ascending: true }).order('id', { ascending: true }),
+      supabase.from('lms_test_attempts').select('id', { count: 'exact', head: true }).eq('test_id', testId).eq('student_id', student_id)
+    ]);
+
+    if (testError) return sendBadRequest(res, testError);
+    if (questionsError) return sendBadRequest(res, questionsError);
+    if (countError) return sendBadRequest(res, countError);
+    if (!test || test.is_published === false) return sendBadRequest(res, 'Тест недоступен');
+    const attemptsLimit = Number(test.attempts_limit || 1);
+    if (attemptsLimit > 0 && Number(count || 0) >= attemptsLimit) return sendBadRequest(res, 'Лимит попыток исчерпан');
+
+    const answers = req.body.answers && typeof req.body.answers === 'object' ? req.body.answers : {};
+    const normalizeAnswer = value => (Array.isArray(value) ? value : [value])
+      .map(Number)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+
+    let score = 0;
+    let total_score = 0;
+    (questions || []).forEach(question => {
+      const points = Number(question.points || 1);
+      const expected = normalizeAnswer(question.correct_answers || []);
+      const actual = normalizeAnswer(answers[question.id] || []);
+      total_score += points;
+      if (expected.length === actual.length && expected.every((value, index) => value === actual[index])) score += points;
+    });
+
+    const percent = total_score ? Math.round((score / total_score) * 100) : 0;
+    const duration_seconds = Math.max(0, parseNumber(req.body.duration_seconds, 'duration_seconds') || 0);
+    const payload = { test_id: testId, student_id, answers, score, total_score, percent, duration_seconds };
+    const { data, error } = await supabase.from('lms_test_attempts').insert([payload]).select('*').single();
+    if (error) return sendBadRequest(res, error);
+    return res.status(201).json({ message: 'Тест отправлен', attempt: data });
+  } catch (err) {
+    return sendServerError(res, 'POST /api/student/tests/:testId/submit', err);
+  }
+});
 app.post('/api/homework-materials/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return sendBadRequest(res, 'Файл не выбран');
@@ -1136,32 +1148,32 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
     if (!teacherId) return sendBadRequest(res, t(req, 'errors.teacher_required'));
 
     let groupIds = [];
-    if (role === 'admin' || role === 'администратор') {
-      const { data: allGroups, error: allGroupsError } = await supabase.from('groups').select('id');
-      if (allGroupsError) return sendBadRequest(res, allGroupsError);
-      groupIds = (allGroups || []).map(item => item.id).filter(Boolean);
+    if (role === 'admin') {
+      const { data: groups, error: groupsLoadError } = await supabase.from('groups').select('id');
+      if (groupsLoadError) return sendBadRequest(res, groupsLoadError);
+      groupIds = (groups || []).map(item => item.id);
     } else {
       const { data: teacherGroups, error: tgError } = await supabase
         .from('teacher_groups')
         .select('group_id')
         .eq('teacher_id', teacherId);
       if (tgError) return sendBadRequest(res, tgError);
-      groupIds = (teacherGroups || []).map(item => item.group_id).filter(Boolean);
+      groupIds = (teacherGroups || []).map(item => item.group_id);
     }
 
     if (!groupIds.length) return res.json([]);
 
-    const [{ data: homeworkData, error: hwError }, { data: testsData, error: testsError }, { data: groupsData, error: groupsError }] = await Promise.all([
+    const [{ data: homeworkData, error: hwError }, { data: sectionsData, error: sectionsError }, { data: groupsData, error: groupsError }] = await Promise.all([
       supabase.from('homework').select('*').in('group_id', groupIds),
-      supabase.from('lms_tests').select('*').in('group_id', groupIds),
+      supabase.from('homework_sections').select('id, group_id, subject_title').in('group_id', groupIds),
       supabase.from('groups').select('id, name').in('id', groupIds)
     ]);
     if (hwError) return sendBadRequest(res, hwError);
-    if (testsError) return sendBadRequest(res, testsError);
+    if (sectionsError) return sendBadRequest(res, sectionsError);
     if (groupsError) return sendBadRequest(res, groupsError);
 
     const homeworkIds = (homeworkData || []).map(item => item.id);
-    const testIds = (testsData || []).map(item => item.id);
+    const sectionIds = (sectionsData || []).map(item => item.id);
 
     let submissions = [];
     if (homeworkIds.length) {
@@ -1176,37 +1188,43 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       submissions = data || [];
     }
 
-    let testAttempts = [];
-    if (testIds.length) {
-      const { data, error } = await supabase
-        .from('lms_test_attempts')
+    let tests = [];
+    let attempts = [];
+    if (sectionIds.length) {
+      const { data: testData, error: testError } = await supabase
+        .from('lms_tests')
         .select('*')
-        .in('test_id', testIds)
-        .eq('status', 'completed')
-        .order('created_at', { ascending: false });
-      if (error) return sendBadRequest(res, error);
-      testAttempts = data || [];
+        .in('section_id', sectionIds);
+      if (testError) return sendBadRequest(res, testError);
+      tests = testData || [];
+
+      const testIds = tests.map(item => item.id);
+      if (testIds.length) {
+        const { data: attemptData, error: attemptError } = await supabase
+          .from('lms_test_attempts')
+          .select('*')
+          .in('test_id', testIds)
+          .order('created_at', { ascending: false });
+        if (attemptError) return sendBadRequest(res, attemptError);
+        attempts = attemptData || [];
+      }
     }
+
+    if (!submissions.length && !attempts.length) return res.json([]);
 
     const studentIds = [...new Set([
       ...submissions.map(item => item.student_id),
-      ...testAttempts.map(item => item.student_id)
+      ...attempts.map(item => item.student_id)
     ].filter(Boolean))];
-
-    let students = [];
-    if (studentIds.length) {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, group_id')
-        .in('id', studentIds);
-      if (error) return sendBadRequest(res, error);
-      students = data || [];
-    }
+    const { data: students, error: stError } = studentIds.length
+      ? await supabase.from('profiles').select('id, full_name, group_id').in('id', studentIds)
+      : { data: [], error: null };
+    if (stError) return sendBadRequest(res, stError);
 
     const homeworkRows = submissions.map(sub => {
-      const hw = (homeworkData || []).find(item => Number(item.id) === Number(sub.homework_id));
-      const student = (students || []).find(item => String(item.id) === String(sub.student_id));
-      const group = (groupsData || []).find(item => Number(item.id) === Number(hw?.group_id));
+      const hw = (homeworkData || []).find(item => item.id === sub.homework_id);
+      const student = (students || []).find(item => item.id === sub.student_id);
+      const group = (groupsData || []).find(item => item.id === hw?.group_id);
       return {
         kind: 'homework',
         submission_id: sub.id,
@@ -1227,246 +1245,64 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       };
     });
 
-    const testRows = testAttempts.map(attempt => {
-      const test = (testsData || []).find(item => Number(item.id) === Number(attempt.test_id));
-      const student = (students || []).find(item => String(item.id) === String(attempt.student_id));
-      const groupId = test?.group_id || student?.group_id || null;
-      const group = (groupsData || []).find(item => Number(item.id) === Number(groupId));
+    const testRows = attempts.map(attempt => {
+      const test = tests.find(item => Number(item.id) === Number(attempt.test_id));
+      const section = (sectionsData || []).find(item => Number(item.id) === Number(test?.section_id));
+      const student = (students || []).find(item => item.id === attempt.student_id);
+      const group = (groupsData || []).find(item => Number(item.id) === Number(section?.group_id));
       return {
         kind: 'test',
         attempt_id: attempt.id,
-        submission_id: `test-${attempt.id}`,
         test_id: attempt.test_id,
-        homework_title: test?.title || 'Тест',
         test_title: test?.title || 'Тест',
-        subject_title: test?.subject_title || '',
-        group_id: groupId,
+        homework_title: test?.title || 'Тест',
+        subject_title: section?.subject_title || '',
+        group_id: section?.group_id || null,
         group_name: group?.name || '',
         student_id: attempt.student_id,
         student_name: student?.full_name || 'Без имени',
-        percent: attempt.percent || 0,
-        score: attempt.score || 0,
-        total_score: attempt.total_score || 0,
-        duration_seconds: attempt.duration_seconds || 0,
+        score: attempt.score,
+        total_score: attempt.total_score,
+        percent: attempt.percent,
+        duration_seconds: attempt.duration_seconds,
         submitted_at: attempt.created_at,
-        status: attempt.status || 'completed'
+        status: 'reviewed'
       };
     });
 
-    return res.json([...homeworkRows, ...testRows].sort((a, b) => Date.parse(b.submitted_at || 0) - Date.parse(a.submitted_at || 0)));
+    const result = homeworkRows.concat(testRows)
+      .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0));
+
+    return res.json(result);
   } catch (err) {
     return sendServerError(res, '/api/teacher/homework/pending/:teacherId', err);
   }
 });
-
 app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
   try {
     const submissionId = parseNumber(req.params.submissionId, 'submissionId', { required: true });
-    const grade = parseGradeInput(req.body.grade);
+    const grade = parseNumber(req.body.grade, 'grade', { required: true });
     const teacher_comment = parseString(req.body.teacher_comment);
-    const reviewedAt = new Date().toISOString();
-
-    if (grade === null) return sendBadRequest(res, 'grade должен быть 0-100, Н, У или О');
 
     const { data, error } = await supabase
       .from('homework_submissions')
-      .update({ grade, teacher_comment, status: 'reviewed', reviewed_at: reviewedAt, updated_at: reviewedAt })
+      .update({ grade, teacher_comment, status: 'reviewed', reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq('id', submissionId)
       .select()
       .single();
 
     if (error) return sendBadRequest(res, error);
-
-    let journalResult = null;
-    let journalWarning = null;
-
-    try {
-      const { data: homework, error: hwError } = await supabase
-        .from('homework')
-        .select('id, title, group_id, subject_id, subject_title')
-        .eq('id', data.homework_id)
-        .maybeSingle();
-
-      if (hwError) {
-        journalWarning = hwError.message || hwError;
-      } else if (homework?.group_id && data.student_id) {
-        const subjectId = await getOrCreateSubjectId(homework.subject_title, homework.subject_id);
-        const journalComment = teacher_comment || `Оценка за ДЗ: ${homework.title || 'домашнее задание'}`;
-        const journalPayload = {
-          group_id: homework.group_id,
-          student_id: data.student_id,
-          subject_id: subjectId,
-          grade,
-          comment: journalComment,
-          created_at: reviewedAt,
-          source_type: 'homework',
-          source_id: submissionId
-        };
-
-        const { data: existing, error: existingError } = await supabase
-          .from('journal')
-          .select('id')
-          .eq('source_type', 'homework')
-          .eq('source_id', submissionId)
-          .maybeSingle();
-
-        if (!existingError && existing?.id) {
-          const { data: updatedJournal, error: updateJournalError } = await supabase
-            .from('journal')
-            .update(journalPayload)
-            .eq('id', existing.id)
-            .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
-            .single();
-          if (updateJournalError) throw updateJournalError;
-          journalResult = updatedJournal;
-        } else if (existingError && String(existingError.message || '').includes('source_type')) {
-          const fallbackPayload = { ...journalPayload };
-          delete fallbackPayload.source_type;
-          delete fallbackPayload.source_id;
-          const { data: insertedJournal, error: insertJournalError } = await supabase
-            .from('journal')
-            .insert([fallbackPayload])
-            .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
-            .single();
-          if (insertJournalError) throw insertJournalError;
-          journalResult = insertedJournal;
-        } else {
-          const { data: insertedJournal, error: insertJournalError } = await supabase
-            .from('journal')
-            .insert([journalPayload])
-            .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
-            .single();
-          if (insertJournalError) throw insertJournalError;
-          journalResult = insertedJournal;
-        }
-      } else {
-        journalWarning = 'Не удалось создать запись в журнале: у ДЗ нет group_id или student_id.';
-      }
-    } catch (journalError) {
-      journalWarning = journalError.message || String(journalError);
-      console.warn('Домашнее задание проверено, но оценка не попала в журнал:', journalWarning);
-    }
-
-    return res.json({ message: t(req, 'homework_reviewed'), submission: data, journal: journalResult, journalWarning });
+    await createNotification({
+      user_id: data.student_id,
+      type: 'homework_reviewed',
+      title: `Домашнее задание оценено: ${data.grade}`,
+      body: data.teacher_comment || 'Проверьте результат в разделе домашних заданий.',
+      link: '#dz',
+      payload: { submission_id: data.id, homework_id: data.homework_id, grade: data.grade }
+    });
+    return res.json({ message: t(req, 'homework_reviewed'), submission: data });
   } catch (err) {
     return sendServerError(res, '/api/teacher/homework/review/:submissionId', err);
-  }
-});
-
-
-app.put('/api/teacher/tests/confirm/:attemptId', async (req, res) => {
-  try {
-    const attemptId = parseNumber(req.params.attemptId, 'attemptId', { required: true });
-    const reviewedAt = new Date().toISOString();
-
-    const { data: attempt, error: attemptError } = await supabase
-      .from('lms_test_attempts')
-      .select('*')
-      .eq('id', attemptId)
-      .maybeSingle();
-
-    if (attemptError) return sendBadRequest(res, attemptError);
-    if (!attempt) return res.status(404).json({ error: 'Попытка теста не найдена' });
-
-    if (attempt.status === 'reviewed') {
-      return res.json({ message: 'Оценка за тест уже подтверждена', attempt });
-    }
-
-    const { data: test, error: testError } = await supabase
-      .from('lms_tests')
-      .select('id, section_id, group_id, subject_title, title')
-      .eq('id', attempt.test_id)
-      .maybeSingle();
-
-    if (testError) return sendBadRequest(res, testError);
-    if (!test) return res.status(404).json({ error: 'Тест не найден' });
-
-    let groupId = test.group_id || null;
-    if (!groupId && test.section_id) {
-      const { data: section, error: sectionError } = await supabase
-        .from('homework_sections')
-        .select('group_id, subject_title')
-        .eq('id', test.section_id)
-        .maybeSingle();
-      if (!sectionError && section?.group_id) groupId = section.group_id;
-      if (!test.subject_title && section?.subject_title) test.subject_title = section.subject_title;
-    }
-
-    if (!groupId) return sendBadRequest(res, 'У теста не найдена группа');
-    if (!attempt.student_id) return sendBadRequest(res, 'У попытки теста не найден ученик');
-
-    const grade = Math.max(0, Math.min(100, Math.round(Number(attempt.percent || 0))));
-    const subjectId = await getOrCreateSubjectId(test.subject_title, null);
-    const journalComment = `Оценка за тест: ${test.title || 'тест'} (${Number(attempt.score || 0)} / ${Number(attempt.total_score || 0)}, ${grade}%)`;
-
-    const journalPayload = {
-      group_id: groupId,
-      student_id: attempt.student_id,
-      subject_id: subjectId,
-      grade,
-      comment: journalComment,
-      created_at: attempt.created_at || reviewedAt,
-      source_type: 'test',
-      source_id: attemptId
-    };
-
-    let journalResult = null;
-
-    const { data: existing, error: existingError } = await supabase
-      .from('journal')
-      .select('id')
-      .eq('source_type', 'test')
-      .eq('source_id', attemptId)
-      .maybeSingle();
-
-    if (!existingError && existing?.id) {
-      const { data: updatedJournal, error: updateJournalError } = await supabase
-        .from('journal')
-        .update(journalPayload)
-        .eq('id', existing.id)
-        .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
-        .single();
-      if (updateJournalError) return sendBadRequest(res, updateJournalError);
-      journalResult = updatedJournal;
-    } else {
-      const { data: insertedJournal, error: insertJournalError } = await supabase
-        .from('journal')
-        .insert([journalPayload])
-        .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
-        .single();
-      if (insertJournalError) return sendBadRequest(res, insertJournalError);
-      journalResult = insertedJournal;
-    }
-
-    const { data: updatedAttempt, error: updateAttemptError } = await supabase
-      .from('lms_test_attempts')
-      .update({ status: 'reviewed' })
-      .eq('id', attemptId)
-      .select('*')
-      .single();
-
-    if (updateAttemptError) return sendBadRequest(res, updateAttemptError);
-
-    try {
-      await supabase.from('notifications').insert([{
-        user_id: String(attempt.student_id),
-        type: 'grade_created',
-        title: 'Тест оценён',
-        body: `Ваша оценка за тест «${test.title || 'Тест'}»: ${grade}`,
-        target: 'grades',
-        is_read: false
-      }]);
-    } catch (notifyError) {
-      console.warn('Оценка за тест подтверждена, но уведомление не создано:', notifyError.message || notifyError);
-    }
-
-    return res.json({
-      message: `Оценка ${grade} за тест подтверждена`,
-      attempt: updatedAttempt,
-      journal: journalResult
-    });
-  } catch (err) {
-    return sendServerError(res, '/api/teacher/tests/confirm/:attemptId', err);
   }
 });
 
@@ -1505,6 +1341,14 @@ app.post('/api/schedule', async (req, res) => {
     const { data, error } = await supabase.from('schedule').insert(rows).select('id, group_id, day_of_week, lesson_number, room, subject_id, subjects(id, title)');
     if (error) return sendBadRequest(res, error);
 
+    await createGroupNotification(groupId, {
+      type: 'schedule',
+      title: 'Расписание обновлено',
+      body: 'Для вашей группы изменили расписание занятий.',
+      link: '#rsp',
+      payload: { group_id: groupId }
+    });
+
     return res.status(201).json({ message: t(req, 'schedule_saved'), schedule: data || [] });
   } catch (err) {
     return sendServerError(res, 'POST /api/schedule', err);
@@ -1522,6 +1366,13 @@ app.put('/api/schedule/:id', async (req, res) => {
 
     const { data, error } = await supabase.from('schedule').update(payload).eq('id', id).select('id, group_id, day_of_week, lesson_number, room, subject_id, subjects(id, title)').single();
     if (error) return sendBadRequest(res, error);
+    await createGroupNotification(data.group_id, {
+      type: 'schedule',
+      title: 'Расписание обновлено',
+      body: `${data.subjects?.title || 'Пара'} · ${data.room || 'кабинет не указан'}`,
+      link: '#rsp',
+      payload: { lesson_id: data.id, group_id: data.group_id }
+    });
     return res.json({ message: t(req, 'schedule_saved'), lesson: data });
   } catch (err) {
     return sendServerError(res, 'PUT /api/schedule/:id', err);
@@ -1804,22 +1655,55 @@ app.post('/api/schedule/import-excel', upload.single('file'), async (req, res) =
 
 app.get('/api/notifications/:userId', async (req, res) => {
   try {
-    const userId = parseNumber(req.params.userId, 'userId', { required: true });
-    const { data, error } = await supabase
+    const userId = parseString(req.params.userId);
+    const groupId = parseNumber(req.query.groupId, 'groupId');
+    const limit = Math.min(parseNumber(req.query.limit, 'limit') || 50, 100);
+    if (!userId) return sendBadRequest(res, 'userId обязателен');
+
+    const { data: userRows, error: userError } = await supabase
       .from('notifications')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
-      .limit(50);
-    if (error) return res.json([]);
-    return res.json(data || []);
+      .limit(limit);
+
+    if (userError) return res.json([]);
+
+    let rows = userRows || [];
+
+    if (groupId) {
+      const { data: groupRows, error: groupError } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('group_id', groupId)
+        .is('user_id', null)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (!groupError && groupRows?.length) {
+        rows = rows.concat(groupRows);
+      }
+    }
+
+    rows.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    return res.json(rows.slice(0, limit));
   } catch (err) { return sendServerError(res, '/api/notifications/:userId', err); }
 });
 
 app.post('/api/notifications', async (req, res) => {
   try {
-    const userId = parseNumber(req.body.user_id, 'user_id', { required: true });
-    const payload = { user_id: userId, title: parseString(req.body.title) || 'Уведомление', body: parseString(req.body.body) || '', is_read: false };
+    const userId = parseString(req.body.user_id);
+    if (!userId) return sendBadRequest(res, 'user_id обязателен');
+    const payload = {
+      user_id: userId,
+      group_id: req.body.group_id === undefined || req.body.group_id === null || req.body.group_id === '' ? null : parseNumber(req.body.group_id, 'group_id'),
+      type: parseString(req.body.type) || 'system',
+      title: parseString(req.body.title) || 'Уведомление',
+      body: parseString(req.body.body) || '',
+      link: parseString(req.body.link) || '',
+      payload: req.body.payload || {},
+      is_read: false
+    };
     const { data, error } = await supabase.from('notifications').insert([payload]).select('*').single();
     if (error) return sendBadRequest(res, error);
     return res.status(201).json(data);
@@ -1834,7 +1718,6 @@ app.put('/api/notifications/:id/read', async (req, res) => {
     return res.json(data);
   } catch (err) { return sendServerError(res, 'PUT /api/notifications/:id/read', err); }
 });
-
 app.get('/api/attendance/:groupId', async (req, res) => {
   try {
     const groupId = parseNumber(req.params.groupId, 'groupId', { required: true });
@@ -1896,9 +1779,49 @@ app.post('/api/quizzes', async (req, res) => {
 
 app.get('/api/admin/users', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('profiles').select('id, full_name, email, role, group_id, course, can_edit_news, can_edit_schedule').order('full_name', { ascending: true });
-    if (error) return sendBadRequest(res, error);
-    return res.json(data || []);
+    // В разных версиях тестовой базы profiles может не иметь email/course/can_edit_schedule.
+    // Поэтому список пользователей грузим через несколько безопасных вариантов select,
+    // а недостающие поля нормализуем ниже, чтобы админка не оставалась пустой.
+    const selectVariants = [
+      'id, full_name, role, group_id, course, can_edit_news, can_edit_schedule',
+      'id, full_name, role, group_id, course, can_edit_news',
+      'id, full_name, role, group_id, course',
+      'id, full_name, role, group_id',
+      'id, role, group_id'
+    ];
+
+    let data = null;
+    let lastError = null;
+
+    for (const columns of selectVariants) {
+      const result = await supabase
+        .from('profiles')
+        .select(columns)
+        .order('full_name', { ascending: true, nullsFirst: false });
+
+      if (!result.error) {
+        data = result.data || [];
+        lastError = null;
+        break;
+      }
+
+      lastError = result.error;
+    }
+
+    if (lastError && !data) return sendBadRequest(res, lastError);
+
+    const normalized = (data || []).map(user => ({
+      id: user.id,
+      full_name: user.full_name || user.name || `Пользователь ${user.id}`,
+      email: user.email || '',
+      role: user.role || 'student',
+      group_id: user.group_id ?? null,
+      course: user.course ?? null,
+      can_edit_news: Boolean(user.can_edit_news),
+      can_edit_schedule: Boolean(user.can_edit_schedule)
+    }));
+
+    return res.json(normalized);
   } catch (err) {
     return sendServerError(res, '/api/admin/users', err);
   }
@@ -1996,6 +1919,72 @@ app.put('/api/admin/users/:userId/access', async (req, res) => {
     return sendServerError(res, '/api/admin/users/:userId/access', err);
   }
 });
+
+
+
+app.get('/api/admin/teacher-groups', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('teacher_groups')
+      .select('teacher_id, group_id, groups(id, name)')
+      .order('teacher_id', { ascending: true });
+    if (error) return sendBadRequest(res, error);
+    return res.json((data || []).map(row => ({
+      teacher_id: row.teacher_id,
+      group_id: row.group_id,
+      group_name: row.groups?.name || null
+    })));
+  } catch (err) {
+    return sendServerError(res, '/api/admin/teacher-groups', err);
+  }
+});
+
+async function updateTeacherGroupsBulk(req, res) {
+  try {
+    const userIds = Array.isArray(req.body.user_ids) ? req.body.user_ids.map(parseString).filter(Boolean) : [];
+    const groupIds = Array.isArray(req.body.group_ids)
+      ? req.body.group_ids.map(value => parseNumber(value, 'group_id', { required: false })).filter(value => Number.isFinite(value))
+      : [];
+
+    if (!userIds.length) return sendBadRequest(res, 'Выберите преподавателей');
+
+    const { data: teachers, error: teachersError } = await supabase
+      .from('profiles')
+      .select('id, role')
+      .in('id', userIds);
+    if (teachersError) return sendBadRequest(res, teachersError);
+
+    const teacherIds = (teachers || [])
+      .filter(user => ['teacher', 'преподаватель', 'учитель'].includes(String(user.role || '').toLowerCase()))
+      .map(user => user.id);
+
+    if (!teacherIds.length) return sendBadRequest(res, 'Среди выбранных пользователей нет преподавателей');
+
+    const { error: deleteError } = await supabase
+      .from('teacher_groups')
+      .delete()
+      .in('teacher_id', teacherIds);
+    if (deleteError) return sendBadRequest(res, deleteError);
+
+    if (groupIds.length) {
+      const rows = [];
+      for (const teacherId of teacherIds) {
+        for (const groupId of groupIds) rows.push({ teacher_id: teacherId, group_id: groupId });
+      }
+      const { error: insertError } = await supabase
+        .from('teacher_groups')
+        .insert(rows);
+      if (insertError) return sendBadRequest(res, insertError);
+    }
+
+    return res.json({ message: 'Группы преподавателей обновлены', teacher_ids: teacherIds, group_ids: groupIds });
+  } catch (err) {
+    return sendServerError(res, '/api/admin/teacher-groups/bulk', err);
+  }
+}
+
+app.put('/api/admin/teacher-groups/bulk', updateTeacherGroupsBulk);
+app.post('/api/admin/teacher-groups/bulk', updateTeacherGroupsBulk);
 
 app.get('/api/teacher/groups/:teacherId', async (req, res) => {
   try {
@@ -2255,6 +2244,13 @@ app.post('/api/news', async (req, res) => {
 
     const { data, error } = await supabase.from('news').insert([{ title, description, image_url, date_start, date_end, created_by }]).select().single();
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      type: 'news',
+      title: `Новая новость: ${data.title}`,
+      body: data.description || '',
+      link: '#news-section',
+      payload: { news_id: data.id }
+    });
     return res.status(201).json({ message: t(req, 'news_published'), news: data });
   } catch (err) {
     return sendServerError(res, 'POST /api/news', err);
