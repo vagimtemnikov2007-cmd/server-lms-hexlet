@@ -1973,7 +1973,7 @@ async function updateTeacherGroupsBulk(req, res) {
       }
       const { error: insertError } = await supabase
         .from('teacher_groups')
-        .insert(rows);
+        .upsert(rows, { onConflict: 'teacher_id,group_id' });
       if (insertError) return sendBadRequest(res, insertError);
     }
 
@@ -2004,7 +2004,27 @@ app.get('/api/teacher/groups/:teacherId', async (req, res) => {
       .eq('teacher_id', teacherId);
 
     if (error) return sendBadRequest(res, error);
-    return res.json((data || []).map(item => item.groups).filter(Boolean));
+    const linked = (data || []).map(item => item.groups).filter(Boolean);
+    if (linked.length) return res.json(linked);
+
+    // Fallback для старых аккаунтов: если teacher_groups ещё пустая,
+    // берём основную group_id из profiles, чтобы старый функционал не умер.
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('group_id')
+      .eq('id', teacherId)
+      .maybeSingle();
+    if (profileError) return sendBadRequest(res, profileError);
+    if (profile?.group_id) {
+      const { data: groupRow } = await supabase
+        .from('groups')
+        .select('id, name')
+        .eq('id', profile.group_id)
+        .maybeSingle();
+      return res.json([groupRow || { id: profile.group_id, name: `Группа ${profile.group_id}` }]);
+    }
+
+    return res.json([]);
   } catch (err) {
     return sendServerError(res, '/api/teacher/groups/:teacherId', err);
   }
