@@ -453,8 +453,14 @@ function buildHomeworkModules({ sections = [], materials = [], homework = [], su
   });
 
   (tests || []).forEach(test => {
-    const attempt = (testAttempts || []).find(item => Number(item.test_id) === Number(test.id)) || null;
-    const normalizedTest = { ...test, attempt };
+    const attempts = (testAttempts || [])
+      .filter(item => Number(item.test_id) === Number(test.id))
+      .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    const attempt = attempts[0] || null;
+    const attemptsCount = attempts.length;
+    const attemptsLimit = Number(test.attempts_limit || 1);
+    const canAttempt = attemptsLimit <= 0 || attemptsCount < attemptsLimit;
+    const normalizedTest = { ...test, attempt, attempts_count: attemptsCount, can_attempt: canAttempt };
     const section = test.section_id ? sectionMap.get(Number(test.section_id)) : null;
     if (section) section.tests.push(normalizedTest);
   });
@@ -544,7 +550,8 @@ app.get('/api/homework-modules/:groupId', async (req, res) => {
         .from('lms_test_attempts')
         .select('*')
         .eq('student_id', studentId)
-        .in('test_id', tests.map(test => test.id));
+        .in('test_id', tests.map(test => test.id))
+        .order('created_at', { ascending: false });
       if (!attemptsError) testAttempts = attemptsData || [];
     }
 
