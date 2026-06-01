@@ -691,6 +691,7 @@ app.post('/api/student/tests/:id/submit', async (req, res) => {
     const student_id = parseString(req.body.student_id);
     if (!student_id) return sendBadRequest(res, 'student_id обязателен');
     const answers = req.body.answers && typeof req.body.answers === 'object' ? req.body.answers : {};
+    const duration_seconds = parseNumber(req.body.duration_seconds, 'duration_seconds') ?? 0;
 
     const { data: test, error: testError } = await supabase
       .from('lms_tests')
@@ -722,7 +723,7 @@ app.post('/api/student/tests/:id/submit', async (req, res) => {
     const limit = Number(test.attempts_limit || 1);
     if (limit > 0 && attemptsCount >= limit) return sendBadRequest(res, 'Попытки закончились');
 
-    const payload = { test_id, student_id, answers, score, total_score: total, percent, status: 'completed' };
+    const payload = { test_id, student_id, answers, score, total_score: total, percent, duration_seconds, status: 'completed' };
     const { data, error } = await supabase.from('lms_test_attempts').insert([payload]).select().single();
     if (error) return sendBadRequest(res, error);
     return res.status(201).json({ message: 'Тест отправлен', attempt: data });
@@ -1124,49 +1125,83 @@ app.get('/api/teacher/homework/submissions/:homeworkId', async (req, res) => {
 app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
   try {
     const teacherId = parseString(req.params.teacherId);
+    const role = parseString(req.query.role);
     if (!teacherId) return sendBadRequest(res, t(req, 'errors.teacher_required'));
 
-    const { data: teacherGroups, error: tgError } = await supabase
-      .from('teacher_groups')
-      .select('group_id')
-      .eq('teacher_id', teacherId);
-    if (tgError) return sendBadRequest(res, tgError);
+    let groupIds = [];
+    if (role === 'admin' || role === 'администратор') {
+      const { data: allGroups, error: allGroupsError } = await supabase.from('groups').select('id');
+      if (allGroupsError) return sendBadRequest(res, allGroupsError);
+      groupIds = (allGroups || []).map(item => item.id).filter(Boolean);
+    } else {
+      const { data: teacherGroups, error: tgError } = await supabase
+        .from('teacher_groups')
+        .select('group_id')
+        .eq('teacher_id', teacherId);
+      if (tgError) return sendBadRequest(res, tgError);
+      groupIds = (teacherGroups || []).map(item => item.group_id).filter(Boolean);
+    }
 
-    const groupIds = (teacherGroups || []).map(item => item.group_id);
     if (!groupIds.length) return res.json([]);
 
-    const { data: homeworkData, error: hwError } = await supabase
-      .from('homework')
-      .select('*')
-      .in('group_id', groupIds);
-    if (hwError) return sendBadRequest(res, hwError);
-
-    const homeworkIds = (homeworkData || []).map(item => item.id);
-    if (!homeworkIds.length) return res.json([]);
-
-    const { data: submissions, error: subError } = await supabase
-      .from('homework_submissions')
-      .select('*')
-      .in('homework_id', homeworkIds)
-      .eq('status', 'submitted')
-      .is('grade', null)
-      .order('submitted_at', { ascending: false });
-    if (subError) return sendBadRequest(res, subError);
-    if (!submissions?.length) return res.json([]);
-
-    const studentIds = submissions.map(item => item.student_id);
-    const [{ data: students, error: stError }, { data: groupsData, error: groupsError }] = await Promise.all([
-      supabase.from('profiles').select('id, full_name, group_id').in('id', studentIds),
+    const [{ data: homeworkData, error: hwError }, { data: testsData, error: testsError }, { data: groupsData, error: groupsError }] = await Promise.all([
+      supabase.from('homework').select('*').in('group_id', groupIds),
+      supabase.from('lms_tests').select('*').in('group_id', groupIds),
       supabase.from('groups').select('id, name').in('id', groupIds)
     ]);
-    if (stError) return sendBadRequest(res, stError);
+    if (hwError) return sendBadRequest(res, hwError);
+    if (testsError) return sendBadRequest(res, testsError);
     if (groupsError) return sendBadRequest(res, groupsError);
 
-    const result = submissions.map(sub => {
-      const hw = (homeworkData || []).find(item => item.id === sub.homework_id);
-      const student = (students || []).find(item => item.id === sub.student_id);
-      const group = (groupsData || []).find(item => item.id === hw?.group_id);
+    const homeworkIds = (homeworkData || []).map(item => item.id);
+    const testIds = (testsData || []).map(item => item.id);
+
+    let submissions = [];
+    if (homeworkIds.length) {
+      const { data, error } = await supabase
+        .from('homework_submissions')
+        .select('*')
+        .in('homework_id', homeworkIds)
+        .eq('status', 'submitted')
+        .is('grade', null)
+        .order('submitted_at', { ascending: false });
+      if (error) return sendBadRequest(res, error);
+      submissions = data || [];
+    }
+
+    let testAttempts = [];
+    if (testIds.length) {
+      const { data, error } = await supabase
+        .from('lms_test_attempts')
+        .select('*')
+        .in('test_id', testIds)
+        .eq('status', 'completed')
+        .order('created_at', { ascending: false });
+      if (error) return sendBadRequest(res, error);
+      testAttempts = data || [];
+    }
+
+    const studentIds = [...new Set([
+      ...submissions.map(item => item.student_id),
+      ...testAttempts.map(item => item.student_id)
+    ].filter(Boolean))];
+
+    let students = [];
+    if (studentIds.length) {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, group_id')
+        .in('id', studentIds);
+      if (error) return sendBadRequest(res, error);
+      students = data || [];
+    }
+
+    const homeworkRows = submissions.map(sub => {
+      const hw = (homeworkData || []).find(item => Number(item.id) === Number(sub.homework_id));
+      const student = (students || []).find(item => String(item.id) === String(sub.student_id));
+      const group = (groupsData || []).find(item => Number(item.id) === Number(hw?.group_id));
       return {
+        kind: 'homework',
         submission_id: sub.id,
         homework_id: sub.homework_id,
         homework_title: hw?.title || 'Без названия',
@@ -1185,7 +1220,33 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
       };
     });
 
-    return res.json(result);
+    const testRows = testAttempts.map(attempt => {
+      const test = (testsData || []).find(item => Number(item.id) === Number(attempt.test_id));
+      const student = (students || []).find(item => String(item.id) === String(attempt.student_id));
+      const groupId = test?.group_id || student?.group_id || null;
+      const group = (groupsData || []).find(item => Number(item.id) === Number(groupId));
+      return {
+        kind: 'test',
+        attempt_id: attempt.id,
+        submission_id: `test-${attempt.id}`,
+        test_id: attempt.test_id,
+        homework_title: test?.title || 'Тест',
+        test_title: test?.title || 'Тест',
+        subject_title: test?.subject_title || '',
+        group_id: groupId,
+        group_name: group?.name || '',
+        student_id: attempt.student_id,
+        student_name: student?.full_name || 'Без имени',
+        percent: attempt.percent || 0,
+        score: attempt.score || 0,
+        total_score: attempt.total_score || 0,
+        duration_seconds: attempt.duration_seconds || 0,
+        submitted_at: attempt.created_at,
+        status: attempt.status || 'completed'
+      };
+    });
+
+    return res.json([...homeworkRows, ...testRows].sort((a, b) => Date.parse(b.submitted_at || 0) - Date.parse(a.submitted_at || 0)));
   } catch (err) {
     return sendServerError(res, '/api/teacher/homework/pending/:teacherId', err);
   }
