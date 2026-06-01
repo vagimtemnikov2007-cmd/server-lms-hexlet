@@ -1262,18 +1262,92 @@ app.get('/api/teacher/homework/pending/:teacherId', async (req, res) => {
 app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
   try {
     const submissionId = parseNumber(req.params.submissionId, 'submissionId', { required: true });
-    const grade = parseNumber(req.body.grade, 'grade', { required: true });
+    const grade = parseGradeInput(req.body.grade);
     const teacher_comment = parseString(req.body.teacher_comment);
+    const reviewedAt = new Date().toISOString();
+
+    if (grade === null) return sendBadRequest(res, 'grade должен быть 0-100, Н, У или О');
 
     const { data, error } = await supabase
       .from('homework_submissions')
-      .update({ grade, teacher_comment, status: 'reviewed', reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .update({ grade, teacher_comment, status: 'reviewed', reviewed_at: reviewedAt, updated_at: reviewedAt })
       .eq('id', submissionId)
       .select()
       .single();
 
     if (error) return sendBadRequest(res, error);
-    return res.json({ message: t(req, 'homework_reviewed'), submission: data });
+
+    let journalResult = null;
+    let journalWarning = null;
+
+    try {
+      const { data: homework, error: hwError } = await supabase
+        .from('homework')
+        .select('id, title, group_id, subject_id, subject_title')
+        .eq('id', data.homework_id)
+        .maybeSingle();
+
+      if (hwError) {
+        journalWarning = hwError.message || hwError;
+      } else if (homework?.group_id && data.student_id) {
+        const subjectId = await getOrCreateSubjectId(homework.subject_title, homework.subject_id);
+        const journalComment = teacher_comment || `Оценка за ДЗ: ${homework.title || 'домашнее задание'}`;
+        const journalPayload = {
+          group_id: homework.group_id,
+          student_id: data.student_id,
+          subject_id: subjectId,
+          grade,
+          comment: journalComment,
+          created_at: reviewedAt,
+          source_type: 'homework',
+          source_id: submissionId
+        };
+
+        const { data: existing, error: existingError } = await supabase
+          .from('journal')
+          .select('id')
+          .eq('source_type', 'homework')
+          .eq('source_id', submissionId)
+          .maybeSingle();
+
+        if (!existingError && existing?.id) {
+          const { data: updatedJournal, error: updateJournalError } = await supabase
+            .from('journal')
+            .update(journalPayload)
+            .eq('id', existing.id)
+            .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
+            .single();
+          if (updateJournalError) throw updateJournalError;
+          journalResult = updatedJournal;
+        } else if (existingError && String(existingError.message || '').includes('source_type')) {
+          const fallbackPayload = { ...journalPayload };
+          delete fallbackPayload.source_type;
+          delete fallbackPayload.source_id;
+          const { data: insertedJournal, error: insertJournalError } = await supabase
+            .from('journal')
+            .insert([fallbackPayload])
+            .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
+            .single();
+          if (insertJournalError) throw insertJournalError;
+          journalResult = insertedJournal;
+        } else {
+          const { data: insertedJournal, error: insertJournalError } = await supabase
+            .from('journal')
+            .insert([journalPayload])
+            .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
+            .single();
+          if (insertJournalError) throw insertJournalError;
+          journalResult = insertedJournal;
+        }
+      } else {
+        journalWarning = 'Не удалось создать запись в журнале: у ДЗ нет group_id или student_id.';
+      }
+    } catch (journalError) {
+      journalWarning = journalError.message || String(journalError);
+      console.warn('Домашнее задание проверено, но оценка не попала в журнал:', journalWarning);
+    }
+
+    return res.json({ message: t(req, 'homework_reviewed'), submission: data, journal: journalResult, journalWarning });
   } catch (err) {
     return sendServerError(res, '/api/teacher/homework/review/:submissionId', err);
   }
