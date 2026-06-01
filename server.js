@@ -218,6 +218,48 @@ function normalizeScheduleRows(rows, groupId) {
   })).filter(row => row.group_id && row.day_of_week && row.lesson_number);
 }
 
+async function createNotification({ user_id = null, group_id = null, type = 'system', title = 'Уведомление', body = '', link = '', payload = {} }) {
+  try {
+    const row = {
+      user_id: user_id === undefined || user_id === null ? null : String(user_id),
+      group_id: group_id === undefined || group_id === null || group_id === '' ? null : Number(group_id),
+      type: parseString(type) || 'system',
+      title: parseString(title) || 'Уведомление',
+      body: parseString(body) || '',
+      link: parseString(link) || '',
+      payload: payload || {},
+      is_read: false
+    };
+    if (!row.group_id) delete row.group_id;
+    const { error } = await supabase.from('notifications').insert([row]);
+    if (error) console.warn('Уведомление не сохранено:', error.message);
+  } catch (err) {
+    console.warn('Уведомление пропущено:', err.message);
+  }
+}
+
+async function createGroupNotification(groupId, notification) {
+  try {
+    const { data: students, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('group_id', Number(groupId))
+      .eq('role', 'student');
+    if (error) {
+      await createNotification({ ...notification, group_id: groupId });
+      return;
+    }
+    const ids = (students || []).map(student => student.id).filter(Boolean);
+    if (!ids.length) {
+      await createNotification({ ...notification, group_id: groupId });
+      return;
+    }
+    await Promise.all(ids.map(id => createNotification({ ...notification, user_id: id, group_id: groupId })));
+  } catch (err) {
+    console.warn('Групповое уведомление пропущено:', err.message);
+  }
+}
+
 /* =========================================================
    UPLOADS
 ========================================================= */
@@ -359,6 +401,15 @@ app.post('/api/journal', async (req, res) => {
       .single();
 
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      user_id: student_id,
+      group_id,
+      type: 'grade',
+      title: `Выставлена оценка: ${data.grade}`,
+      body: `${data.subjects?.title || subject_id || 'Предмет'} · ${comment || 'Комментарий не указан'}`,
+      link: '#ysp',
+      payload: { grade_id: data.id, grade: data.grade, subject_id }
+    });
     return res.status(201).json({ message: t(req, 'grade_saved'), grade: data });
   } catch (err) {
     return sendServerError(res, 'POST /api/journal', err);
@@ -388,6 +439,15 @@ app.put('/api/journal/:id', async (req, res) => {
       .single();
 
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      user_id: data.student_id,
+      group_id: data.group_id,
+      type: 'grade',
+      title: `Оценка обновлена: ${data.grade}`,
+      body: `${data.subjects?.title || 'Предмет'} · ${data.comment || 'Комментарий не указан'}`,
+      link: '#ysp',
+      payload: { grade_id: data.id, grade: data.grade, subject_id: data.subject_id }
+    });
     return res.json({ message: t(req, 'grade_saved'), grade: data });
   } catch (err) {
     return sendServerError(res, 'PUT /api/journal/:id', err);
@@ -1008,6 +1068,14 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
       .single();
 
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      user_id: data.student_id,
+      type: 'homework_reviewed',
+      title: `Домашнее задание оценено: ${data.grade}`,
+      body: data.teacher_comment || 'Проверьте результат в разделе домашних заданий.',
+      link: '#dz',
+      payload: { submission_id: data.id, homework_id: data.homework_id, grade: data.grade }
+    });
     return res.json({ message: t(req, 'homework_reviewed'), submission: data });
   } catch (err) {
     return sendServerError(res, '/api/teacher/homework/review/:submissionId', err);
@@ -1049,6 +1117,14 @@ app.post('/api/schedule', async (req, res) => {
     const { data, error } = await supabase.from('schedule').insert(rows).select('id, group_id, day_of_week, lesson_number, room, subject_id, subjects(id, title)');
     if (error) return sendBadRequest(res, error);
 
+    await createGroupNotification(groupId, {
+      type: 'schedule',
+      title: 'Расписание обновлено',
+      body: 'Для вашей группы изменили расписание занятий.',
+      link: '#rsp',
+      payload: { group_id: groupId }
+    });
+
     return res.status(201).json({ message: t(req, 'schedule_saved'), schedule: data || [] });
   } catch (err) {
     return sendServerError(res, 'POST /api/schedule', err);
@@ -1066,6 +1142,13 @@ app.put('/api/schedule/:id', async (req, res) => {
 
     const { data, error } = await supabase.from('schedule').update(payload).eq('id', id).select('id, group_id, day_of_week, lesson_number, room, subject_id, subjects(id, title)').single();
     if (error) return sendBadRequest(res, error);
+    await createGroupNotification(data.group_id, {
+      type: 'schedule',
+      title: 'Расписание обновлено',
+      body: `${data.subjects?.title || 'Пара'} · ${data.room || 'кабинет не указан'}`,
+      link: '#rsp',
+      payload: { lesson_id: data.id, group_id: data.group_id }
+    });
     return res.json({ message: t(req, 'schedule_saved'), lesson: data });
   } catch (err) {
     return sendServerError(res, 'PUT /api/schedule/:id', err);
@@ -1712,7 +1795,7 @@ app.get('/api/profile/:id', async (req, res) => {
   try {
     const id = parseString(req.params.id);
     if (!id) return sendBadRequest(res, 'id обязателен');
-    const { data, error } = await supabase.from('profiles').select('avatar_url, can_edit_news, can_edit_schedule, role, group_id, full_name').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('profiles').select('avatar_url').eq('id', id).maybeSingle();
     if (error) return sendBadRequest(res, error);
     return res.json(data || {});
   } catch (err) {
@@ -1799,6 +1882,13 @@ app.post('/api/news', async (req, res) => {
 
     const { data, error } = await supabase.from('news').insert([{ title, description, image_url, date_start, date_end, created_by }]).select().single();
     if (error) return sendBadRequest(res, error);
+    await createNotification({
+      type: 'news',
+      title: `Новая новость: ${data.title}`,
+      body: data.description || '',
+      link: '#news-section',
+      payload: { news_id: data.id }
+    });
     return res.status(201).json({ message: t(req, 'news_published'), news: data });
   } catch (err) {
     return sendServerError(res, 'POST /api/news', err);
