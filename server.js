@@ -1353,6 +1353,123 @@ app.put('/api/teacher/homework/review/:submissionId', async (req, res) => {
   }
 });
 
+
+app.put('/api/teacher/tests/confirm/:attemptId', async (req, res) => {
+  try {
+    const attemptId = parseNumber(req.params.attemptId, 'attemptId', { required: true });
+    const reviewedAt = new Date().toISOString();
+
+    const { data: attempt, error: attemptError } = await supabase
+      .from('lms_test_attempts')
+      .select('*')
+      .eq('id', attemptId)
+      .maybeSingle();
+
+    if (attemptError) return sendBadRequest(res, attemptError);
+    if (!attempt) return res.status(404).json({ error: 'Попытка теста не найдена' });
+
+    if (attempt.status === 'reviewed') {
+      return res.json({ message: 'Оценка за тест уже подтверждена', attempt });
+    }
+
+    const { data: test, error: testError } = await supabase
+      .from('lms_tests')
+      .select('id, section_id, group_id, subject_title, title')
+      .eq('id', attempt.test_id)
+      .maybeSingle();
+
+    if (testError) return sendBadRequest(res, testError);
+    if (!test) return res.status(404).json({ error: 'Тест не найден' });
+
+    let groupId = test.group_id || null;
+    if (!groupId && test.section_id) {
+      const { data: section, error: sectionError } = await supabase
+        .from('homework_sections')
+        .select('group_id, subject_title')
+        .eq('id', test.section_id)
+        .maybeSingle();
+      if (!sectionError && section?.group_id) groupId = section.group_id;
+      if (!test.subject_title && section?.subject_title) test.subject_title = section.subject_title;
+    }
+
+    if (!groupId) return sendBadRequest(res, 'У теста не найдена группа');
+    if (!attempt.student_id) return sendBadRequest(res, 'У попытки теста не найден ученик');
+
+    const grade = Math.max(0, Math.min(100, Math.round(Number(attempt.percent || 0))));
+    const subjectId = await getOrCreateSubjectId(test.subject_title, null);
+    const journalComment = `Оценка за тест: ${test.title || 'тест'} (${Number(attempt.score || 0)} / ${Number(attempt.total_score || 0)}, ${grade}%)`;
+
+    const journalPayload = {
+      group_id: groupId,
+      student_id: attempt.student_id,
+      subject_id: subjectId,
+      grade,
+      comment: journalComment,
+      created_at: attempt.created_at || reviewedAt,
+      source_type: 'test',
+      source_id: attemptId
+    };
+
+    let journalResult = null;
+
+    const { data: existing, error: existingError } = await supabase
+      .from('journal')
+      .select('id')
+      .eq('source_type', 'test')
+      .eq('source_id', attemptId)
+      .maybeSingle();
+
+    if (!existingError && existing?.id) {
+      const { data: updatedJournal, error: updateJournalError } = await supabase
+        .from('journal')
+        .update(journalPayload)
+        .eq('id', existing.id)
+        .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
+        .single();
+      if (updateJournalError) return sendBadRequest(res, updateJournalError);
+      journalResult = updatedJournal;
+    } else {
+      const { data: insertedJournal, error: insertJournalError } = await supabase
+        .from('journal')
+        .insert([journalPayload])
+        .select('id, student_id, subject_id, grade, created_at, comment, group_id, subjects(title)')
+        .single();
+      if (insertJournalError) return sendBadRequest(res, insertJournalError);
+      journalResult = insertedJournal;
+    }
+
+    const { data: updatedAttempt, error: updateAttemptError } = await supabase
+      .from('lms_test_attempts')
+      .update({ status: 'reviewed' })
+      .eq('id', attemptId)
+      .select('*')
+      .single();
+
+    if (updateAttemptError) return sendBadRequest(res, updateAttemptError);
+
+    try {
+      await supabase.from('notifications').insert([{
+        user_id: String(attempt.student_id),
+        type: 'grade_created',
+        title: 'Тест оценён',
+        body: `Ваша оценка за тест «${test.title || 'Тест'}»: ${grade}`,
+        target: 'grades',
+        is_read: false
+      }]);
+    } catch (notifyError) {
+      console.warn('Оценка за тест подтверждена, но уведомление не создано:', notifyError.message || notifyError);
+    }
+
+    return res.json({
+      message: `Оценка ${grade} за тест подтверждена`,
+      attempt: updatedAttempt,
+      journal: journalResult
+    });
+  } catch (err) {
+    return sendServerError(res, '/api/teacher/tests/confirm/:attemptId', err);
+  }
+});
+
 /* =========================================================
    SCHEDULE
 ========================================================= */
